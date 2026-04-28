@@ -1187,39 +1187,46 @@ def _build_futures_candidates(base_code: str) -> list:
     """
     Build Coinbase futures product ID candidates.
     Confirmed formats from Coinbase URLs:
-      NOL-18MAY26-CDE  (oil)
-      GOL-27MAR26-CDE  (gold — active months: Feb,Apr,Jun,Aug,Dec)
-      SLR-28APR26-CDE  (silver)
-    Also try short format: NOLK26, GOLJ26, SLRJ26
+      NOL-18MAY26-CDE  (oil monthly)
+      GOL-26JUN26-CDE  (gold — active months ONLY: Feb,Apr,Jun,Aug,Dec)
+      SLR-28APR26-CDE  (silver monthly)
+    Short format also works: NOLK26, GOLM26, SLRM26
+    Gold April contract expired ~Apr 25 — June is next active.
     """
     now = datetime.datetime.now()
     cme = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
            7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
     mon_names = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
                  7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
-    # Expiry days confirmed from Coinbase URLs
-    mon_days  = {1:16,2:19,3:27,4:28,5:18,6:26,
+    # Approximate expiry days per month for long format
+    mon_days  = {1:16,2:19,3:27,4:25,5:18,6:26,
                  7:17,8:19,9:25,10:16,11:19,12:18}
 
-    # Gold only trades Feb(G), Apr(J), Jun(M), Aug(Q), Dec(Z)
+    # Gold: active months only Feb(G), Apr(J), Jun(M), Aug(Q), Dec(Z)
     gold_months = {2,4,6,8,12}
 
     candidates = []
-    # Try current + next 5 months to find active contract
-    for delta in range(6):
+    for delta in range(8):  # look further ahead for gold
         m = now.month + delta
         y = now.year + (m-1)//12
         m = ((m-1)%12)+1
         yr2 = str(y)[-2:]
 
-        # Skip non-active months for gold
+        # Gold: skip non-active months
         if base_code == "GOL" and m not in gold_months:
             continue
 
-        # Short format: NOLK26
+        # Skip expired contracts — if we're past expiry day this month
+        if delta == 0 and now.day > mon_days.get(m, 28):
+            continue  # this month's contract has expired, skip it
+
+        # Short format: GOLM26
         candidates.append(f"{base_code}{cme[m]}{yr2}")
-        # Long format: NOL-18MAY26-CDE
+        # Long format: GOL-26JUN26-CDE
         candidates.append(f"{base_code}-{mon_days[m]}{mon_names[m]}{yr2}-CDE")
+
+        if len(candidates) >= 8:
+            break
 
     return candidates
 
