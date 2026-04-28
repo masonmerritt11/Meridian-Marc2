@@ -110,7 +110,7 @@ ASSETS = {
         "type":          "macro",
         "vol":            0.012,
         "color":          "⚪",
-        "price_source":  "alphavantage",
+        "price_source":  "coinbase",
         "corr_group":    "metals",     # high corr to Gold — same group
         "futures_perp":  None,
         "futures_nano":  "SLV",
@@ -1184,32 +1184,62 @@ def get_balance() -> float:
     return state["account_balance"]
 
 def get_price(symbol: str) -> Optional[float]:
-    """Get price — Coinbase for BTC, Alpha Vantage for metals."""
-    if symbol == "BTC-USD":
-        try:
-            data = cb_get("/api/v3/brokerage/market/products/BTC-USD")
-            return float(data.get("price", 0)) or None
-        except Exception as e:
-            log.warning(f"CB price failed BTC-USD: {e}")
-            # Fallback to public v2 spot
-            try:
-                r = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=8)
-                return float(r.json()["data"]["amount"])
-            except Exception:
-                return None
+    """
+    Get price — ALL assets via Coinbase only. No Alpha Vantage.
+    Crypto: spot products. Metals/Oil: futures perpetuals or monthly.
+    """
+    FUTURES_MAP = {
+        "XAU-USD": ["XAU-PERP", "CGN"],
+        "XAG-USD": ["XAG-PERP", "SLV"],
+        "OIL-USD": ["WTI-PERP", "NOL"],
+    }
+    now = datetime.datetime.now()
+    month_codes = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
+                   7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
+
+    # Build candidate product IDs
+    if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
+        candidates = [symbol]
     else:
-        # Gold and Silver via Alpha Vantage realtime exchange rate
-        fx = {"XAU-USD": "XAU", "XAG-USD": "XAG"}.get(symbol)
-        if not fx: return None
+        base = FUTURES_MAP.get(symbol, [])
+        monthly = []
+        base_code = base[-1] if base else ""
+        for delta in range(3):
+            m = now.month+delta; y = now.year+(m-1)//12; m=((m-1)%12)+1
+            monthly.append(f"{base_code}{month_codes[m]}{str(y)[-2:]}")
+        candidates = base + monthly
+
+    # Try each candidate via authenticated API
+    for pid in candidates:
         try:
-            url = (f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
-                   f"&from_currency={fx}&to_currency=USD&apikey={AV_KEY}")
-            r = requests.get(url, timeout=10)
-            rate = r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
-            return float(rate)
+            data  = cb_get(f"/api/v3/brokerage/market/products/{pid}")
+            price = float(data.get("price", 0))
+            if price > 0:
+                return price
+        except Exception:
+            continue
+
+    # Fallback: public Coinbase v2 spot (crypto only, no auth)
+    if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
+        try:
+            sym = symbol.replace("-USD", "")
+            r   = requests.get(
+                f"https://api.coinbase.com/v2/prices/{sym}-USD/spot",
+                timeout=8
+            )
+            return float(r.json()["data"]["amount"])
         except Exception as e:
-            log.warning(f"AV price failed {symbol}: {e}")
-            return None
+            log.warning(f"CB v2 fallback failed {symbol}: {e}")
+
+    # Last resort: cached price
+    cached = state.get("last_prices", {}).get(symbol)
+    if cached:
+        log.warning(f"  {symbol}: using cached price ${cached:.4f}")
+        return cached
+
+    log.warning(f"  {symbol}: all price sources failed")
+    return None
+
 
 def get_candles(symbol: str) -> list:
     """
@@ -2877,7 +2907,7 @@ def send_daily_summary():
 
 def should_send_daily_summary() -> bool:
     """Send at 5pm ET (22:00 UTC) once per day."""
-    now   = datetime.datetime.utcnow()
+    now   = datetime.datetime.now(datetime.timezone.utc)
     today = datetime.date.today().isoformat()
     last  = state.get("last_email_date", "")
     return now.hour == 22 and last != today
