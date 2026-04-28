@@ -113,7 +113,7 @@ ASSETS = {
         "price_source":  "coinbase",
         "corr_group":    "metals",     # high corr to Gold — same group
         "futures_perp":  None,
-        "futures_nano":  "SLV",
+        "futures_nano":  "SLR",   # Coinbase uses SLR for silver
         "contract_size":  100,         # troy oz per contract
         "min_contracts":  1,
         "max_leverage":   20,
@@ -1185,32 +1185,42 @@ def get_balance() -> float:
 
 def _build_futures_candidates(base_code: str) -> list:
     """
-    Build list of Coinbase futures product ID candidates to try.
-    Coinbase uses multiple formats — try them all.
-    Format 1: NOLK26   (code + CME month letter + 2-digit year)
-    Format 2: NOL-18MAY26-CDE  (code + date + exchange suffix)
+    Build Coinbase futures product ID candidates.
+    Confirmed formats from Coinbase URLs:
+      NOL-18MAY26-CDE  (oil)
+      GOL-27MAR26-CDE  (gold — active months: Feb,Apr,Jun,Aug,Dec)
+      SLR-28APR26-CDE  (silver)
+    Also try short format: NOLK26, GOLJ26, SLRJ26
     """
     now = datetime.datetime.now()
-    # CME month codes
     cme = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
            7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
-    # Month names for long format
     mon_names = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
                  7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
-    # Rough days per month for date format
-    mon_days  = {1:17,2:19,3:19,4:17,5:18,6:18,
-                 7:17,8:19,9:18,10:16,11:19,12:18}
+    # Expiry days confirmed from Coinbase URLs
+    mon_days  = {1:16,2:19,3:27,4:28,5:18,6:26,
+                 7:17,8:19,9:25,10:16,11:19,12:18}
+
+    # Gold only trades Feb(G), Apr(J), Jun(M), Aug(Q), Dec(Z)
+    gold_months = {2,4,6,8,12}
 
     candidates = []
-    for delta in range(4):
+    # Try current + next 5 months to find active contract
+    for delta in range(6):
         m = now.month + delta
         y = now.year + (m-1)//12
         m = ((m-1)%12)+1
         yr2 = str(y)[-2:]
+
+        # Skip non-active months for gold
+        if base_code == "GOL" and m not in gold_months:
+            continue
+
         # Short format: NOLK26
         candidates.append(f"{base_code}{cme[m]}{yr2}")
         # Long format: NOL-18MAY26-CDE
         candidates.append(f"{base_code}-{mon_days[m]}{mon_names[m]}{yr2}-CDE")
+
     return candidates
 
 
@@ -1245,7 +1255,7 @@ def get_price(symbol: str) -> Optional[float]:
     # ── Metals & Oil: futures contracts ───────────────────
     BASE_CODES = {
         "XAU-USD": "GOL",   # Gold nano futures (1 troy oz)
-        "XAG-USD": "SLV",   # Silver micro futures (100 troy oz)
+        "XAG-USD": "SLR",   # Silver futures — Coinbase uses SLR not SLV
         "OIL-USD": "NOL",   # Nano crude oil (10 barrels WTI)
     }
     base = BASE_CODES.get(symbol)
@@ -1286,7 +1296,7 @@ def get_candles(symbol: str) -> list:
         product_ids = [symbol]
     else:
         # Use same futures resolution as get_price
-        BASE_CODES = {"XAU-USD":"GOL","XAG-USD":"SLV","OIL-USD":"NOL"}
+        BASE_CODES = {"XAU-USD":"GOL","XAG-USD":"SLR","OIL-USD":"NOL"}
         base = BASE_CODES.get(symbol,"")
         product_ids = _build_futures_candidates(base) if base else []
 
