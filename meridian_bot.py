@@ -1183,58 +1183,91 @@ def get_balance() -> float:
         log.warning(f"Balance fetch failed: {e}")
     return state["account_balance"]
 
+def _build_futures_candidates(base_code: str) -> list:
+    """
+    Build list of Coinbase futures product ID candidates to try.
+    Coinbase uses multiple formats — try them all.
+    Format 1: NOLK26   (code + CME month letter + 2-digit year)
+    Format 2: NOL-18MAY26-CDE  (code + date + exchange suffix)
+    """
+    now = datetime.datetime.now()
+    # CME month codes
+    cme = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
+           7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
+    # Month names for long format
+    mon_names = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
+                 7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
+    # Rough days per month for date format
+    mon_days  = {1:17,2:19,3:19,4:17,5:18,6:18,
+                 7:17,8:19,9:18,10:16,11:19,12:18}
+
+    candidates = []
+    for delta in range(4):
+        m = now.month + delta
+        y = now.year + (m-1)//12
+        m = ((m-1)%12)+1
+        yr2 = str(y)[-2:]
+        # Short format: NOLK26
+        candidates.append(f"{base_code}{cme[m]}{yr2}")
+        # Long format: NOL-18MAY26-CDE
+        candidates.append(f"{base_code}-{mon_days[m]}{mon_names[m]}{yr2}-CDE")
+    return candidates
+
+
 def get_price(symbol: str) -> Optional[float]:
     """
     Get price — ALL assets via Coinbase only. No Alpha Vantage.
-    Crypto: spot products. Metals/Oil: futures perpetuals or monthly.
+    Crypto: spot products (public endpoint, no auth needed).
+    Metals/Oil: futures monthly contracts via authenticated API.
     """
-    FUTURES_MAP = {
-        "XAU-USD": ["XAU-PERP", "CGN"],
-        "XAG-USD": ["XAG-PERP", "SLV"],
-        "OIL-USD": ["WTI-PERP", "NOL"],
-    }
-    now = datetime.datetime.now()
-    month_codes = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
-                   7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
-
-    # Build candidate product IDs
+    # ── Crypto: use fast public endpoint ─────────────────
     if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
-        candidates = [symbol]
-    else:
-        base = FUTURES_MAP.get(symbol, [])
-        monthly = []
-        base_code = base[-1] if base else ""
-        for delta in range(3):
-            m = now.month+delta; y = now.year+(m-1)//12; m=((m-1)%12)+1
-            monthly.append(f"{base_code}{month_codes[m]}{str(y)[-2:]}")
-        candidates = base + monthly
+        # Public v2 — fastest, no auth
+        try:
+            sym = symbol.replace("-USD","")
+            r   = requests.get(
+                f"https://api.coinbase.com/v2/prices/{sym}-USD/spot",
+                timeout=8
+            )
+            price = float(r.json()["data"]["amount"])
+            if price > 0: return price
+        except Exception:
+            pass
+        # Auth fallback
+        try:
+            data  = cb_get(f"/api/v3/brokerage/market/products/{symbol}")
+            price = float(data.get("price", 0))
+            if price > 0: return price
+        except Exception as e:
+            log.warning(f"  {symbol}: price failed — {e}")
+        return None
 
-    # Try each candidate via authenticated API
+    # ── Metals & Oil: futures contracts ───────────────────
+    BASE_CODES = {
+        "XAU-USD": "GOL",   # Gold nano futures (1 troy oz)
+        "XAG-USD": "SLV",   # Silver micro futures (100 troy oz)
+        "OIL-USD": "NOL",   # Nano crude oil (10 barrels WTI)
+    }
+    base = BASE_CODES.get(symbol)
+    if not base:
+        log.warning(f"  {symbol}: no futures mapping")
+        return None
+
+    candidates = _build_futures_candidates(base)
     for pid in candidates:
         try:
             data  = cb_get(f"/api/v3/brokerage/market/products/{pid}")
             price = float(data.get("price", 0))
             if price > 0:
+                log.info(f"  {symbol}: ${price:.4f} via {pid}")
                 return price
         except Exception:
             continue
 
-    # Fallback: public Coinbase v2 spot (crypto only, no auth)
-    if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
-        try:
-            sym = symbol.replace("-USD", "")
-            r   = requests.get(
-                f"https://api.coinbase.com/v2/prices/{sym}-USD/spot",
-                timeout=8
-            )
-            return float(r.json()["data"]["amount"])
-        except Exception as e:
-            log.warning(f"CB v2 fallback failed {symbol}: {e}")
-
-    # Last resort: cached price
+    # Cached fallback
     cached = state.get("last_prices", {}).get(symbol)
     if cached:
-        log.warning(f"  {symbol}: using cached price ${cached:.4f}")
+        log.warning(f"  {symbol}: using cached ${cached:.4f}")
         return cached
 
     log.warning(f"  {symbol}: all price sources failed")
@@ -1252,21 +1285,10 @@ def get_candles(symbol: str) -> list:
     if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
         product_ids = [symbol]
     else:
-        # Use the same futures resolution as get_price
-        FUTURES_MAP = {
-            "XAU-USD": ["XAU-PERP", "CGN"],
-            "XAG-USD": ["XAG-PERP", "SLV"],
-            "OIL-USD": ["WTI-PERP", "NOL"],
-        }
-        now = datetime.datetime.now()
-        month_codes = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
-                       7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
-        base_code = FUTURES_MAP.get(symbol, [""])[0].split("-")[0] if "-PERP" in FUTURES_MAP.get(symbol,[""])[0] else FUTURES_MAP.get(symbol,["XX"])[-1]
-        monthly_ids = []
-        for delta in range(3):
-            m = now.month+delta; y = now.year+(m-1)//12; m=((m-1)%12)+1
-            monthly_ids.append(f"{base_code}{month_codes[m]}{str(y)[-2:]}")
-        product_ids = FUTURES_MAP.get(symbol, []) + monthly_ids
+        # Use same futures resolution as get_price
+        BASE_CODES = {"XAU-USD":"GOL","XAG-USD":"SLV","OIL-USD":"NOL"}
+        base = BASE_CODES.get(symbol,"")
+        product_ids = _build_futures_candidates(base) if base else []
 
     # Try each product ID
     for pid in product_ids:
