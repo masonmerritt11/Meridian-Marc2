@@ -96,9 +96,9 @@ ASSETS = {
         "type":          "macro",
         "vol":            0.006,
         "color":          "🟡",
-        "price_source":  "alphavantage",
+        "price_source":  "coinbase",
         "corr_group":    "metals",
-        "futures_perp":  None,
+        "futures_perp":  "XAU-PERP",
         "futures_nano":  "CGN",
         "contract_size":  1,           # troy oz per contract
         "min_contracts":  1,
@@ -124,9 +124,9 @@ ASSETS = {
         "type":          "macro",      # macro-driven: OPEC, DXY, growth
         "vol":            0.020,
         "color":          "🛢️",
-        "price_source":  "alphavantage",
-        "corr_group":    "energy",     # own group — low crypto corr
-        "futures_perp":  None,
+        "price_source":  "coinbase",
+        "corr_group":    "energy",
+        "futures_perp":  "WTI-PERP",
         "futures_nano":  "NOL",        # nano crude oil, 10 barrels WTI
         "contract_size":  10,          # barrels per contract
         "min_contracts":  1,
@@ -947,8 +947,8 @@ def fetch_macro_context() -> dict:
     # Only refresh macro data once per hour to save API calls
     last = state.get("last_macro_fetch")
     if last:
-        age = (datetime.datetime.now() - datetime.datetime.fromisoformat(last)).seconds
-        if age < 3600 and state.get("macro_context"):
+        age = (datetime.datetime.now() - datetime.datetime.fromisoformat(last)).total_seconds()
+        if age < 21600 and state.get("macro_context"):  # 6 hours between macro fetches
             return state["macro_context"]
 
     macro = {
@@ -1212,23 +1212,70 @@ def get_price(symbol: str) -> Optional[float]:
             return None
 
 def get_candles(symbol: str) -> list:
-    """Get 30-min OHLC candles — Coinbase for crypto, AV for metals."""
-    coinbase_symbols = {"BTC-USD", "ETH-USD", "XRP-USD"}
-    if symbol in coinbase_symbols:
-        try:
-            path = f"/api/v3/brokerage/market/products/{symbol}/candles?granularity=THIRTY_MINUTE&limit=80"
-            raw  = cb_get(path).get("candles", [])
-            if not raw: raise ValueError("empty")
-            return [{"open": float(c["open"]), "high": float(c["high"]),
-                     "low":  float(c["low"]),  "close": float(c["close"])} for c in reversed(raw)]
-        except Exception as e:
-            log.warning(f"CB candles failed {symbol}: {e}")
-            if symbol == "BTC-USD": return _av_candles_btc()
-            return []   # no AV fallback for ETH/XRP — skip rather than error
-    elif symbol == "OIL-USD":
-        return _av_candles_oil()
+    """
+    Get 30-min OHLC candles — ALL from Coinbase.
+    Crypto: direct product candles
+    Metals/Oil: futures product candles (nearest contract)
+    Fallback: public exchange API (no auth)
+    """
+    # Resolve the product ID to fetch candles from
+    if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
+        product_ids = [symbol]
     else:
-        return _av_candles(symbol)
+        # Use the same futures resolution as get_price
+        FUTURES_MAP = {
+            "XAU-USD": ["XAU-PERP", "CGN"],
+            "XAG-USD": ["XAG-PERP", "SLV"],
+            "OIL-USD": ["WTI-PERP", "NOL"],
+        }
+        now = datetime.datetime.now()
+        month_codes = {1:"F",2:"G",3:"H",4:"J",5:"K",6:"M",
+                       7:"N",8:"Q",9:"U",10:"V",11:"X",12:"Z"}
+        base_code = FUTURES_MAP.get(symbol, [""])[0].split("-")[0] if "-PERP" in FUTURES_MAP.get(symbol,[""])[0] else FUTURES_MAP.get(symbol,["XX"])[-1]
+        monthly_ids = []
+        for delta in range(3):
+            m = now.month+delta; y = now.year+(m-1)//12; m=((m-1)%12)+1
+            monthly_ids.append(f"{base_code}{month_codes[m]}{str(y)[-2:]}")
+        product_ids = FUTURES_MAP.get(symbol, []) + monthly_ids
+
+    # Try each product ID
+    for pid in product_ids:
+        try:
+            path = f"/api/v3/brokerage/market/products/{pid}/candles?granularity=THIRTY_MINUTE&limit=80"
+            raw  = cb_get(path).get("candles", [])
+            if not raw: continue
+            candles = [{"open":float(c["open"]),"high":float(c["high"]),
+                        "low":float(c["low"]),"close":float(c["close"])}
+                       for c in reversed(raw)]
+            if candles:
+                log.info(f"  {symbol}: {len(candles)} candles via {pid}")
+                return candles
+        except Exception:
+            continue
+
+    # Fallback: public Coinbase Exchange API (no auth, crypto only)
+    if symbol in {"BTC-USD", "ETH-USD", "XRP-USD"}:
+        try:
+            url = (f"https://api.exchange.coinbase.com/products/{symbol}/candles"
+                   f"?granularity=1800&limit=80")
+            r   = requests.get(url, timeout=10)
+            raw = r.json()
+            if isinstance(raw, list) and raw:
+                candles = []
+                for c in reversed(raw):
+                    candles.append({"open":float(c[3]),"high":float(c[2]),
+                                    "low":float(c[1]),"close":float(c[4])})
+                log.info(f"  {symbol}: {len(candles)} candles via public API")
+                return candles
+        except Exception as e:
+            log.warning(f"Public candles failed {symbol}: {e}")
+
+    # Last resort for crypto: Alpha Vantage
+    if symbol == "BTC-USD":
+        return _av_candles_btc()
+
+    log.warning(f"  {symbol}: no candles available")
+    return []
 
 def _av_candles_btc() -> list:
     """BTC candles fallback via Alpha Vantage."""
@@ -3079,6 +3126,10 @@ def main():
                 p = get_price(symbol)
                 if p:
                     prices[symbol] = p
+                    # Cache for fallback
+                    if "last_prices" not in state:
+                        state["last_prices"] = {}
+                    state["last_prices"][symbol] = p
                     log.info(f"  {ASSETS[symbol]['color']} {symbol}: ${p:,.4f}")
 
             # Check exits first
