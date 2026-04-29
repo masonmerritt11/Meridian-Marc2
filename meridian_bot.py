@@ -796,32 +796,15 @@ logging.basicConfig(
 log = logging.getLogger("meridian")
 
 # ─────────────────────────────────────────────
-# PORTFOLIO CONFIGURATION
-# ─────────────────────────────────────────────
-CRYPTO_ASSETS    = {"BTC-USD", "ETH-USD", "XRP-USD"}
-COMMODITY_ASSETS = {"XAU-USD", "XAG-USD", "OIL-USD"}
-
-def get_portfolio(symbol: str) -> str:
-    """Returns 'crypto' or 'commodity' for a given symbol."""
-    return "crypto" if symbol in CRYPTO_ASSETS else "commodity"
-
-# ─────────────────────────────────────────────
 # STATE
 # ─────────────────────────────────────────────
 state = {
     "trades_today":          0,
     "last_reset_date":       None,
     "open_positions":        {},
-    # Dual portfolio balances — tracked separately
-    "account_balance":       CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
-    "crypto_balance":        CRYPTO_START_BALANCE,
-    "commodity_balance":     COMMODITY_START_BALANCE,
-    "peak_balance":          CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
-    "peak_crypto":           CRYPTO_START_BALANCE,
-    "peak_commodity":        COMMODITY_START_BALANCE,
-    "daily_start_balance":   CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
-    "crypto_pnl":            0.0,
-    "commodity_pnl":         0.0,
+    "account_balance":       SAFETY["account_size_usd"],
+    "peak_balance":          SAFETY["account_size_usd"],
+    "daily_start_balance":   SAFETY["account_size_usd"],
     "total_pnl":             0.0,
     "total_trades":          0,
     "wins":                  0,
@@ -1132,6 +1115,13 @@ def macro_score_for_btc(macro: dict) -> tuple[int, str]:
 # COINBASE API
 # ─────────────────────────────────────────────
 CB_BASE = "https://api.coinbase.com"
+
+# Optional Coinbase Derivatives Exchange credentials.
+# Leave these blank unless you specifically have CDE/FairX credentials.
+CDE_BASE_URL    = os.environ.get("CDE_BASE_URL", "https://api.exchange.fairx.net")
+CDE_KEY         = os.environ.get("CDE_KEY", "")
+CDE_SECRET      = os.environ.get("CDE_SECRET", "")
+CDE_PASSPHRASE  = os.environ.get("CDE_PASSPHRASE", "")
 
 # ── Coinbase CDP JWT auth (required for Advanced Trade API v3) ──
 import base64, jwt as pyjwt
@@ -2746,9 +2736,8 @@ def try_enter(symbol: str, candles: list, price: float, macro: dict):
             log.info(f"  {symbol}: SKIP — loss memory: {avoid_reason}")
             return
 
-    # Position sizing — use portfolio-specific balance
-    portfolio = get_portfolio(symbol)
-    balance   = get_balance(portfolio)
+    # Position sizing — use single account balance
+    balance   = get_balance()
     if s["score"] >= 90:
         base_risk_pct = SAFETY["risk_hc_90"]
         risk_tag = f"20% perfect"
@@ -3066,10 +3055,6 @@ def build_dashboard_html() -> str:
     bal      = state.get("account_balance", 500)
     peak     = state.get("peak_balance", 500)
     pnl      = state.get("total_pnl", 0)
-    cb       = state.get("crypto_balance", CRYPTO_START_BALANCE)
-    cob      = state.get("commodity_balance", COMMODITY_START_BALANCE)
-    cp       = state.get("crypto_pnl", 0)
-    cop      = state.get("commodity_pnl", 0)
     wins     = state.get("wins", 0)
     losses   = state.get("losses", 0)
     total_tr = state.get("total_trades", 0)
@@ -3196,23 +3181,11 @@ tr:hover td{{background:#141920}}
 </div>
 
 <div class="grid">
-  <div class="stat"><div class="sl">Total Balance</div><div class="sv" style="color:{bal_col}">${bal:,.2f}</div></div>
-  <div class="stat"><div class="sl">🔵 Crypto P&L</div><div class="sv" style="color:{'#00d17a' if cp>=0 else '#ff4757'}">${cp:+.2f}</div></div>
-  <div class="stat"><div class="sl">🟡 Commodity P&L</div><div class="sv" style="color:{'#00d17a' if cop>=0 else '#ff4757'}">${cop:+.2f}</div></div>
+  <div class="stat"><div class="sl">Balance</div><div class="sv" style="color:{bal_col}">${bal:,.2f}</div></div>
+  <div class="stat"><div class="sl">Total P&L</div><div class="sv" style="color:{pnl_col}">${pnl:+.2f}</div></div>
   <div class="stat"><div class="sl">Win Rate</div><div class="sv" style="color:#3b8bff">{wr:.1f}%</div></div>
+  <div class="stat"><div class="sl">Trades ({wins}W/{losses}L)</div><div class="sv">{total_tr}</div></div>
   <div class="stat"><div class="sl">Drawdown / Threshold</div><div class="sv" style="color:#ffb800">{dd:.1f}% / {thresh}+</div></div>
-</div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.07)">
-  <div style="background:#0e1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:10px;color:#475569">🔵 CRYPTO PORTFOLIO</span>
-    <span style="font-size:16px;font-weight:700;color:{'#00d17a' if cb>=CRYPTO_START_BALANCE else '#ff4757'}">${cb:,.2f}</span>
-    <span style="font-size:10px;color:#475569">started ${CRYPTO_START_BALANCE:.0f}</span>
-  </div>
-  <div style="background:#0e1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:10px;color:#475569">🟡 COMMODITY PORTFOLIO</span>
-    <span style="font-size:16px;font-weight:700;color:{'#00d17a' if cob>=COMMODITY_START_BALANCE else '#ff4757'}">${cob:,.2f}</span>
-    <span style="font-size:10px;color:#475569">started ${COMMODITY_START_BALANCE:.0f} {'⚠️ CDE pending' if not CDE_KEY else '✅ CDE live'}</span>
-  </div>
 </div>
 
 <div class="body">
