@@ -796,15 +796,32 @@ logging.basicConfig(
 log = logging.getLogger("meridian")
 
 # ─────────────────────────────────────────────
+# PORTFOLIO CONFIGURATION
+# ─────────────────────────────────────────────
+CRYPTO_ASSETS    = {"BTC-USD", "ETH-USD", "XRP-USD"}
+COMMODITY_ASSETS = {"XAU-USD", "XAG-USD", "OIL-USD"}
+
+def get_portfolio(symbol: str) -> str:
+    """Returns 'crypto' or 'commodity' for a given symbol."""
+    return "crypto" if symbol in CRYPTO_ASSETS else "commodity"
+
+# ─────────────────────────────────────────────
 # STATE
 # ─────────────────────────────────────────────
 state = {
     "trades_today":          0,
     "last_reset_date":       None,
     "open_positions":        {},
-    "account_balance":       SAFETY["account_size_usd"],
-    "peak_balance":          SAFETY["account_size_usd"],
-    "daily_start_balance":   SAFETY["account_size_usd"],
+    # Dual portfolio balances — tracked separately
+    "account_balance":       CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
+    "crypto_balance":        CRYPTO_START_BALANCE,
+    "commodity_balance":     COMMODITY_START_BALANCE,
+    "peak_balance":          CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
+    "peak_crypto":           CRYPTO_START_BALANCE,
+    "peak_commodity":        COMMODITY_START_BALANCE,
+    "daily_start_balance":   CRYPTO_START_BALANCE + COMMODITY_START_BALANCE,
+    "crypto_pnl":            0.0,
+    "commodity_pnl":         0.0,
     "total_pnl":             0.0,
     "total_trades":          0,
     "wins":                  0,
@@ -1170,6 +1187,37 @@ def cb_post(path: str, body: dict) -> dict:
     r.raise_for_status()
     return r.json()
 
+def cde_get(path: str, params: dict = None) -> dict:
+    """
+    Make authenticated GET request to Coinbase Derivatives Exchange.
+    Different auth system from Advanced Trade API.
+    Requires CDE_KEY, CDE_SECRET, CDE_PASSPHRASE env vars.
+    """
+    if not CDE_KEY or not CDE_SECRET or not CDE_PASSPHRASE:
+        raise ValueError("CDE credentials not configured")
+
+    import urllib.parse
+    timestamp  = str(int(time.time()))
+    query      = "?" + urllib.parse.urlencode(params) if params else ""
+    req_path   = path  # just the path, no query for signing
+    message    = timestamp + "GET" + req_path + ""
+    hmac_key   = base64.b64decode(CDE_SECRET)
+    sig        = hmac.new(hmac_key, message.encode("utf-8"), hashlib.sha256).digest()
+    sig_b64    = base64.b64encode(sig).decode()
+
+    headers = {
+        "CB-ACCESS-KEY":       CDE_KEY,
+        "CB-ACCESS-SIGN":      sig_b64,
+        "CB-ACCESS-PASSPHRASE": CDE_PASSPHRASE,
+        "CB-ACCESS-TIMESTAMP": timestamp,
+        "Content-Type":        "application/json",
+    }
+    url = CDE_BASE_URL + path + query
+    r   = requests.get(url, headers=headers, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
 def get_balance() -> float:
     try:
         data = cb_get("/api/v3/brokerage/accounts")
@@ -1281,8 +1329,35 @@ def get_price(symbol: str) -> Optional[float]:
         except Exception:
             continue
 
-    # Gold/Silver AV fallback — AV FX rate is reliable for metals
+    # Gold/Silver — try CDE first (live futures), fall back to AV (cached 6h)
     if symbol in {"XAU-USD", "XAG-USD"}:
+        # Try CDE live futures price if credentials configured
+        if CDE_KEY and CDE_SECRET and CDE_PASSPHRASE:
+            cde_sym = "GOL" if symbol == "XAU-USD" else "SLR"
+            cde_candidates = _build_futures_candidates(cde_sym)
+            for pid in cde_candidates:
+                try:
+                    data  = cde_get("/rest/instruments", {"symbol": pid})
+                    price = float(data.get("mark_price") or data.get("last_price") or 0)
+                    if price > 0:
+                        log.info(f"  {symbol}: ${price:.4f} via CDE {pid}")
+                        return price
+                except Exception:
+                    continue
+
+        # AV fallback — cached 6 hours to stay within free tier limits
+        cache_key  = f"av_price_{symbol}"
+        cache_time = f"av_time_{symbol}"
+        cached_p   = state.get(cache_key)
+        cached_t   = state.get(cache_time)
+        if cached_p and cached_t:
+            age = (datetime.datetime.now() -
+                   datetime.datetime.fromisoformat(cached_t)).total_seconds()
+            if age < 21600:  # 6 hour cache
+                log.info(f"  {symbol}: ${cached_p:.4f} via AV cache ({age/3600:.1f}h old)")
+                return cached_p
+
+        # Cache expired — fetch fresh from AV
         fx = "XAU" if symbol == "XAU-USD" else "XAG"
         try:
             url = (f"https://www.alphavantage.co/query"
@@ -1292,10 +1367,15 @@ def get_price(symbol: str) -> Optional[float]:
             rate = r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
             price = float(rate)
             if price > 0:
-                log.info(f"  {symbol}: ${price:.4f} via Alpha Vantage {fx}/USD")
+                state[cache_key]  = price
+                state[cache_time] = datetime.datetime.now().isoformat()
+                log.info(f"  {symbol}: ${price:.4f} via Alpha Vantage {fx}/USD (fresh)")
                 return price
         except Exception as e:
             log.warning(f"  {symbol}: AV fallback failed — {e}")
+            if cached_p:
+                log.info(f"  {symbol}: using stale cache ${cached_p:.4f}")
+                return cached_p
 
     # Cached last price
     cached = state.get("last_prices", {}).get(symbol)
@@ -2666,8 +2746,9 @@ def try_enter(symbol: str, candles: list, price: float, macro: dict):
             log.info(f"  {symbol}: SKIP — loss memory: {avoid_reason}")
             return
 
-    # Position sizing — variable risk × asset allocation multiplier
-    balance  = get_balance()
+    # Position sizing — use portfolio-specific balance
+    portfolio = get_portfolio(symbol)
+    balance   = get_balance(portfolio)
     if s["score"] >= 90:
         base_risk_pct = SAFETY["risk_hc_90"]
         risk_tag = f"20% perfect"
@@ -2985,6 +3066,10 @@ def build_dashboard_html() -> str:
     bal      = state.get("account_balance", 500)
     peak     = state.get("peak_balance", 500)
     pnl      = state.get("total_pnl", 0)
+    cb       = state.get("crypto_balance", CRYPTO_START_BALANCE)
+    cob      = state.get("commodity_balance", COMMODITY_START_BALANCE)
+    cp       = state.get("crypto_pnl", 0)
+    cop      = state.get("commodity_pnl", 0)
     wins     = state.get("wins", 0)
     losses   = state.get("losses", 0)
     total_tr = state.get("total_trades", 0)
@@ -3111,11 +3196,23 @@ tr:hover td{{background:#141920}}
 </div>
 
 <div class="grid">
-  <div class="stat"><div class="sl">Balance</div><div class="sv" style="color:{bal_col}">${bal:,.2f}</div></div>
-  <div class="stat"><div class="sl">Total P&L</div><div class="sv" style="color:{pnl_col}">${pnl:+.2f}</div></div>
+  <div class="stat"><div class="sl">Total Balance</div><div class="sv" style="color:{bal_col}">${bal:,.2f}</div></div>
+  <div class="stat"><div class="sl">🔵 Crypto P&L</div><div class="sv" style="color:{'#00d17a' if cp>=0 else '#ff4757'}">${cp:+.2f}</div></div>
+  <div class="stat"><div class="sl">🟡 Commodity P&L</div><div class="sv" style="color:{'#00d17a' if cop>=0 else '#ff4757'}">${cop:+.2f}</div></div>
   <div class="stat"><div class="sl">Win Rate</div><div class="sv" style="color:#3b8bff">{wr:.1f}%</div></div>
-  <div class="stat"><div class="sl">Trades ({wins}W/{losses}L)</div><div class="sv">{total_tr}</div></div>
   <div class="stat"><div class="sl">Drawdown / Threshold</div><div class="sv" style="color:#ffb800">{dd:.1f}% / {thresh}+</div></div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.07)">
+  <div style="background:#0e1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+    <span style="font-size:10px;color:#475569">🔵 CRYPTO PORTFOLIO</span>
+    <span style="font-size:16px;font-weight:700;color:{'#00d17a' if cb>=CRYPTO_START_BALANCE else '#ff4757'}">${cb:,.2f}</span>
+    <span style="font-size:10px;color:#475569">started ${CRYPTO_START_BALANCE:.0f}</span>
+  </div>
+  <div style="background:#0e1117;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+    <span style="font-size:10px;color:#475569">🟡 COMMODITY PORTFOLIO</span>
+    <span style="font-size:16px;font-weight:700;color:{'#00d17a' if cob>=COMMODITY_START_BALANCE else '#ff4757'}">${cob:,.2f}</span>
+    <span style="font-size:10px;color:#475569">started ${COMMODITY_START_BALANCE:.0f} {'⚠️ CDE pending' if not CDE_KEY else '✅ CDE live'}</span>
+  </div>
 </div>
 
 <div class="body">
