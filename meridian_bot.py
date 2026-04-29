@@ -1281,7 +1281,23 @@ def get_price(symbol: str) -> Optional[float]:
         except Exception:
             continue
 
-    # Cached fallback
+    # Gold/Silver AV fallback — AV FX rate is reliable for metals
+    if symbol in {"XAU-USD", "XAG-USD"}:
+        fx = "XAU" if symbol == "XAU-USD" else "XAG"
+        try:
+            url = (f"https://www.alphavantage.co/query"
+                   f"?function=CURRENCY_EXCHANGE_RATE"
+                   f"&from_currency={fx}&to_currency=USD&apikey={AV_KEY}")
+            r    = requests.get(url, timeout=10)
+            rate = r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
+            price = float(rate)
+            if price > 0:
+                log.info(f"  {symbol}: ${price:.4f} via Alpha Vantage {fx}/USD")
+                return price
+        except Exception as e:
+            log.warning(f"  {symbol}: AV fallback failed — {e}")
+
+    # Cached last price
     cached = state.get("last_prices", {}).get(symbol)
     if cached:
         log.warning(f"  {symbol}: using cached ${cached:.4f}")
@@ -1342,6 +1358,10 @@ def get_candles(symbol: str) -> list:
     # Last resort for crypto: Alpha Vantage
     if symbol == "BTC-USD":
         return _av_candles_btc()
+
+    # Gold/Silver AV candle fallback
+    if symbol in {"XAU-USD", "XAG-USD"}:
+        return _av_candles(symbol)
 
     log.warning(f"  {symbol}: no candles available")
     return []
