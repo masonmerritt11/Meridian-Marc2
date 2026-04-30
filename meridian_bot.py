@@ -941,66 +941,73 @@ def close_position(symbol: str, pos: dict, price: float, reason: str):
 def check_exits(prices: dict):
     """Check all open positions for exit conditions."""
     for symbol, pos in list(state["open_positions"].items()):
-        price = prices.get(symbol)
-        if not price: continue
+        try:
+            price = prices.get(symbol)
+            if not price: continue
 
-        side    = pos["side"]
-        entry   = pos["entry"]
-        stop    = pos["stop"]
-        target  = pos["target"]
-        target1 = pos.get("target1", target)
-        atr     = pos.get("atr", price*0.01)
+            side   = pos["side"]
+            entry  = pos["entry"]
+            stop   = pos["stop"]
+            target = pos["target"]
+            atr    = pos.get("atr", price * 0.01)
 
-        # ── Stop hit ─────────────────────────────────────
-        if (side=="long" and price<=stop) or (side=="short" and price>=stop):
-            close_position(symbol, pos, price, "Stop loss")
-            continue
+            # Original stop distance — fixed reference for R calculations
+            if not pos.get("orig_stop_dist"):
+                pos["orig_stop_dist"] = abs(entry - stop) or atr
 
-        # ── Move to break-even ───────────────────────────
-        if not pos["stop_moved_be"]:
-            r_moved = (price-entry)/abs(entry-stop) if side=="long" \
-                      else (entry-price)/abs(stop-entry)
-            if r_moved >= SAFETY["breakeven_at_r"]:
+            osd = pos["orig_stop_dist"]
+            r_moved = (price-entry)/osd if side=="long" else (entry-price)/osd
+
+            # Unrealized P&L
+            sz = pos.get("size_remaining", pos["size"])
+            upnl = (price-entry)*sz if side=="long" else (entry-price)*sz
+            log.info(f"  {symbol} {side.upper()}: ${price:.4f} | "
+                     f"stop=${stop:.4f} target=${target:.4f} | "
+                     f"R={r_moved:.2f} | P&L=${upnl:+.2f}")
+
+            # Stop hit
+            if (side=="long" and price<=stop) or (side=="short" and price>=stop):
+                close_position(symbol, pos, price, "Stop loss")
+                continue
+
+            # Target hit
+            if (side=="long" and price>=target) or (side=="short" and price<=target):
+                close_position(symbol, pos, price, "Target hit")
+                continue
+
+            # Move stop to break-even at 1R
+            if not pos.get("stop_moved_be") and r_moved >= SAFETY["breakeven_at_r"]:
                 pos["stop"] = entry
                 pos["stop_moved_be"] = True
-                log.info(f"  {symbol}: Stop moved to break-even ${entry:.4f}")
+                log.info(f"  {symbol}: ✅ BE stop set ${entry:.4f}")
 
-        # ── Partial take-profit at 1.5R ──────────────────
-        if not pos["partial_done"] and SAFETY.get("partial_tp_at_r"):
-            r_moved = (price-entry)/abs(entry-stop) if side=="long" \
-                      else (entry-price)/abs(stop-entry)
-            if r_moved >= SAFETY["partial_tp_at_r"]:
-                # Take 50% off
-                half_size = pos["size"] / 2
-                half_pnl  = (price-entry)*half_size if side=="long" \
-                             else (entry-price)*half_size
-                state["account_balance"] += half_pnl
-                state["total_pnl"]       += half_pnl
-                if pos["portfolio"]=="crypto": state["crypto_pnl"] += half_pnl
-                else: state["commodity_pnl"] += half_pnl
-                pos["size_remaining"] = half_size
-                pos["partial_done"]   = True
-                log.info(f"  {symbol}: Partial TP — took ${half_pnl:+.2f} off at {price:.4f}")
+            # Partial take-profit at 1.5R
+            if not pos.get("partial_done") and r_moved >= SAFETY.get("partial_tp_at_r", 1.5):
+                half = pos["size"] / 2
+                pnl  = (price-entry)*half if side=="long" else (entry-price)*half
+                state["account_balance"] += pnl
+                state["total_pnl"] += pnl
+                key = "crypto_pnl" if pos.get("portfolio")=="crypto" else "commodity_pnl"
+                state[key] += pnl
+                pos["size_remaining"] = half
+                pos["partial_done"] = True
+                log.info(f"  {symbol}: 💰 Partial TP ${pnl:+.2f} at {r_moved:.1f}R")
 
-        # ── Trail remaining position ─────────────────────
-        if pos["partial_done"] and SAFETY.get("trail_remaining"):
-            trail = atr * SAFETY["trail_atr_mult"]
-            if side == "long":
-                new_stop = price - trail
-                if new_stop > pos["stop"]:
-                    pos["stop"] = new_stop
-            else:
-                new_stop = price + trail
-                if new_stop < pos["stop"]:
-                    pos["stop"] = new_stop
+            # Trail stop after partial
+            if pos.get("partial_done") and SAFETY.get("trail_remaining"):
+                trail = atr * SAFETY.get("trail_atr_mult", 0.8)
+                ns = (price-trail) if side=="long" else (price+trail)
+                if side=="long" and ns > pos["stop"]:
+                    pos["stop"] = ns
+                    log.info(f"  {symbol}: 📈 Trail → ${ns:.4f}")
+                elif side=="short" and ns < pos["stop"]:
+                    pos["stop"] = ns
+                    log.info(f"  {symbol}: 📉 Trail → ${ns:.4f}")
 
-        # ── Full target hit ──────────────────────────────
-        if (side=="long" and price>=target) or (side=="short" and price<=target):
-            close_position(symbol, pos, price, "Target hit")
+        except Exception as e:
+            log.error(f"  Exit error {symbol}: {e}", exc_info=True)
 
-# ══════════════════════════════════════════════════════════
-# MAIN SCAN LOOP
-# ══════════════════════════════════════════════════════════
+
 def scan():
     """One full scan cycle — fetch prices, score setups, manage positions."""
     macro  = fetch_macro()
