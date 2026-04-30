@@ -374,18 +374,36 @@ def calc_bb(closes: list, period: int = 20) -> dict:
     return {"upper":sma+2*std,"lower":sma-2*std,"mid":sma,"width":4*std/sma*100 if sma>0 else 0}
 
 def calc_sr(candles: list, price: float) -> tuple[float,float]:
+    """
+    Find significant support and resistance levels.
+    Uses ALL available candles for better level detection.
+    Minimum distance enforced so stop/target are always meaningful.
+    """
     H = [c["h"] for c in candles]
     L = [c["l"] for c in candles]
-    def cluster(arr):
+
+    def cluster(arr, tol=0.005):
         s = sorted(arr); cs = []
         for v in s:
-            if cs and abs(v-cs[-1][-1])/v < 0.003: cs[-1].append(v)
+            if cs and abs(v-cs[-1][-1])/v < tol: cs[-1].append(v)
             else: cs.append([v])
         return [sum(c)/len(c) for c in cs]
-    sups = [v for v in cluster(L[-60:]) if v < price]
-    ress = [v for v in cluster(H[-60:]) if v > price]
-    sup  = sups[-1] if sups else min(L[-20:])
-    res  = ress[0]  if ress else max(H[-20:])
+
+    sups = [v for v in cluster(L) if v < price * 0.999]
+    ress = [v for v in cluster(H) if v > price * 1.001]
+
+    # Use nearest significant level
+    sup = sups[-1] if sups else min(L)
+    res = ress[0]  if ress else max(H)
+
+    # Enforce minimum distance — at least 0.5% from price
+    # This ensures stop and target are always tradeable
+    min_dist = price * 0.005
+    if price - sup < min_dist:
+        sup = price - min_dist * 2
+    if res - price < min_dist:
+        res = price + min_dist * 2
+
     return sup, res
 
 def calc_fib_levels(high: float, low: float) -> dict:
@@ -609,9 +627,10 @@ def score_setup(symbol: str, candles: list, price: float,
     # ── 7. VOLUME / VOLATILITY CONFIRMS (+10) ────────────
     vol_pts = 0
     bb_width = bb["width"]
-    if 1.5 < bb_width < 8.0:   vol_pts = 10   # healthy vol, not too wide
-    elif 0.8 < bb_width <= 1.5: vol_pts = 5   # low vol — may compress/expand
-    elif bb_width > 8.0:        vol_pts = 2   # too volatile
+    # Futures have different vol profiles — wider thresholds
+    if 0.5 < bb_width < 12.0:   vol_pts = 10   # healthy vol range for futures
+    elif 0.2 < bb_width <= 0.5: vol_pts = 6    # low vol — squeeze coming
+    elif bb_width > 12.0:       vol_pts = 3    # very high vol — careful
     score += vol_pts
     breakdown["vol"] = vol_pts
     notes.append(f"vol={vol_pts}")
@@ -796,6 +815,15 @@ def open_position(symbol: str, score_data: dict, price: float):
         return
     size = risk_usd / stop_dist
 
+    # Sanity cap — size in units, not dollars
+    # XRP: max 5000 units, BTC: max 0.5, ETH: max 5, Gold: max 5oz, Oil: max 50 barrels
+    MAX_SIZE = {"BTC-USD":0.5,"ETH-USD":5.0,"XRP-USD":5000,
+                "XAU-USD":5.0,"XAG-USD":500,"OIL-USD":50}
+    max_s = MAX_SIZE.get(symbol, 9999)
+    if size > max_s:
+        log.info(f"  {symbol}: Size capped at {max_s} (was {size:.2f})")
+        size = max_s
+
     # Check drawdown limits
     daily_loss = state["daily_start_bal"] - state["account_balance"]
     if daily_loss / state["daily_start_bal"] > SAFETY["max_daily_loss_pct"]:
@@ -966,11 +994,16 @@ def scan():
     # Fetch all prices
     log.info("Fetching prices...")
     for symbol in ASSETS:
-        p = get_price(symbol)
-        if p:
-            prices[symbol] = p
-            state["last_prices"][symbol] = p
-            log.info(f"  {ASSETS[symbol]['color']} {symbol}: ${p:,.4f}")
+        try:
+            p = get_price(symbol)
+            if p and p > 0:
+                prices[symbol] = p
+                state["last_prices"][symbol] = p
+                log.info(f"  {ASSETS[symbol]['color']} {symbol}: ${p:,.4f}")
+            else:
+                log.warning(f"  {symbol}: price fetch returned None/zero")
+        except Exception as e:
+            log.warning(f"  {symbol}: price fetch error — {e}")
 
     # Check exits first
     check_exits(prices)
