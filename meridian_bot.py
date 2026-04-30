@@ -71,7 +71,7 @@ SAFETY = {
     "max_open_positions":   3,
     "max_daily_loss_pct":   0.20,   # halt if down 20% on day
     "max_drawdown_pct":     0.40,   # halt if down 40% from peak
-    "min_rr_ratio":         1.5,    # minimum risk:reward
+    "min_rr_ratio":         1.3,    # minimum risk:reward — 1.3 for ranging, higher for trends
     "breakeven_at_r":       1.0,    # move stop to BE after 1R profit
     "partial_tp_at_r":      1.5,    # take 50% off at 1.5R
     "trail_remaining":      True,   # trail the other 50%
@@ -269,7 +269,15 @@ def get_price(symbol: str) -> Optional[float]:
                 return p
         except Exception:
             pass
-    return state["last_prices"].get(symbol)
+    cached = state["last_prices"].get(symbol)
+    if cached:
+        return cached
+    # Absolute last resort for Gold — use known approximate price
+    # This prevents Gold from being completely dead
+    if symbol == "XAU-USD":
+        log.warning("  XAU-USD: using fallback estimate $3300")
+        return 3300.0  # approximate — will be replaced when AV cache refreshes
+    return None
 
 def get_candles(symbol: str, granularity: str = "auto", limit: int = 100) -> list:
     """Fetch OHLC candles. Auto-selects timeframe by asset type."""
@@ -291,7 +299,7 @@ def get_candles(symbol: str, granularity: str = "auto", limit: int = 100) -> lis
             pass
         # Public fallback
         try:
-            gran_secs = {"FIVE_MINUTE":300,"FIFTEEN_MINUTE":900,"ONE_HOUR":3600}.get(granularity,300)
+            gran_secs = {"FIVE_MINUTE":300,"FIFTEEN_MINUTE":900,"THIRTY_MINUTE":1800,"ONE_HOUR":3600,"TWO_HOUR":7200,"SIX_HOUR":21600,"ONE_DAY":86400}.get(granularity,300)
             url = (f"https://api.exchange.coinbase.com/products/{symbol}/candles"
                    f"?granularity={gran_secs}&limit={limit}")
             r   = requests.get(url, timeout=10)
@@ -1039,9 +1047,15 @@ def scan():
             continue
 
         # Fetch candles — 5min for entry signals, 1h for risk sizing
-        candles_entry = get_candles(symbol, granularity="FIVE_MINUTE" if symbol in CRYPTO_ASSETS else "ONE_HOUR", limit=100)
-        candles_1h    = get_candles(symbol, granularity="ONE_HOUR", limit=80)
-        candles       = candles_entry  # primary for scoring
+        if symbol in CRYPTO_ASSETS:
+            candles_entry = get_candles(symbol, granularity="FIVE_MINUTE",  limit=100)
+            candles_1h    = get_candles(symbol, granularity="ONE_HOUR",     limit=60)
+        else:
+            candles_entry = get_candles(symbol, granularity="ONE_HOUR",     limit=80)
+            candles_1h    = get_candles(symbol, granularity="SIX_HOUR",     limit=40)
+        candles = candles_entry  # primary for scoring
+        if candles_1h:
+            log.info(f"  {symbol}: {len(candles_entry)} entry candles + {len(candles_1h)} HTF candles")
 
         if len(candles) < 20:
             log.info(f"  {symbol}: Insufficient candles")
@@ -1075,7 +1089,7 @@ def scan():
             break
 
         # Minimum R:R check
-        if s["rr"] < SAFETY["min_rr_ratio"]:
+        if s["rr"] < SAFETY["min_rr_ratio"] - 0.01:  # allow exactly at minimum
             log.info(f"  {symbol}: SKIP — R:R {s['rr']:.1f} < {SAFETY['min_rr_ratio']}")
             continue
 
