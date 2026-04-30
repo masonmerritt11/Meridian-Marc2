@@ -513,7 +513,8 @@ def check_ny_breakout(symbol: str, price: float, direction: str) -> tuple[bool, 
 # MASTER SCORING ENGINE
 # ══════════════════════════════════════════════════════════
 def score_setup(symbol: str, candles: list, price: float,
-                macro: dict, direction: str) -> dict:
+                macro: dict, direction: str,
+                candles_htf: list = None) -> dict:
     """
     Score a potential trade from 0-100.
     Uses weighted indicators — no single indicator is required.
@@ -529,7 +530,12 @@ def score_setup(symbol: str, candles: list, price: float,
     rsi_val  = calc_rsi(closes)
     macd     = calc_macd(closes)
     bb       = calc_bb(closes)
-    atr_val  = calc_atr(candles)
+    atr_val  = calc_atr(candles)   # entry TF ATR — for BB/vol scoring
+    # Use higher TF ATR for stop/target sizing — much more meaningful
+    if candles_htf and len(candles_htf) >= 14:
+        atr_htf = calc_atr(candles_htf)  # 1h ATR — wider, avoids noise stops
+    else:
+        atr_htf = atr_val * 12  # rough 1h estimate from 5-min (12 x 5min = 1h)
     e20      = calc_ema(closes[-20:], 20)
     e50      = calc_ema(closes[-50:] if len(closes)>=50 else closes, 50)
     e200     = calc_ema(closes[-100:] if len(closes)>=100 else closes, 100)
@@ -636,13 +642,13 @@ def score_setup(symbol: str, candles: list, price: float,
     notes.append(f"vol={vol_pts}")
 
     # ── 8. R:R CLEAN (+10) ──────────────────────────────
-    # Calculate actual stop and target
+    # Use 1H ATR for stop/target — meaningful sizing, not 5-min noise
     if direction == "long":
-        stop   = sup - atr_val * 0.5
-        target = res
+        stop   = sup - atr_htf * 1.0           # 1x hourly ATR below support
+        target = max(res, price + atr_htf * 2.5)  # 2.5x hourly ATR minimum target
     else:
-        stop   = res + atr_val * 0.5
-        target = sup
+        stop   = res + atr_htf * 1.0           # 1x hourly ATR above resistance
+        target = min(sup, price - atr_htf * 2.5)  # 2.5x hourly ATR minimum target
     risk   = abs(price-stop)
     reward = abs(target-price)
     rr     = reward/risk if risk > 0 else 0
@@ -687,7 +693,8 @@ def score_setup(symbol: str, candles: list, price: float,
         "stop":      stop,
         "target":    target,
         "rr":        rr,
-        "atr":       atr_val,
+        "atr":       atr_htf,   # use HTF ATR for position management
+        "atr_entry": atr_val,   # entry TF ATR
         "sup":       sup,
         "res":       res,
         "regime":    regime,
@@ -1031,8 +1038,11 @@ def scan():
         if not price:
             continue
 
-        # Fetch candles
-        candles = get_candles(symbol)
+        # Fetch candles — 5min for entry signals, 1h for risk sizing
+        candles_entry = get_candles(symbol, granularity="FIVE_MINUTE" if symbol in CRYPTO_ASSETS else "ONE_HOUR", limit=100)
+        candles_1h    = get_candles(symbol, granularity="ONE_HOUR", limit=80)
+        candles       = candles_entry  # primary for scoring
+
         if len(candles) < 20:
             log.info(f"  {symbol}: Insufficient candles")
             continue
@@ -1042,7 +1052,7 @@ def scan():
 
         # Score both directions
         for direction in ("long","short"):
-            s = score_setup(symbol, candles, price, macro, direction)
+            s = score_setup(symbol, candles, price, macro, direction, candles_1h)
             if s["tier"]:  # score >= 50
                 best_setups.append((symbol, price, s, candles))
                 log.info(f"  {symbol} {direction.upper()}: score={s['score']}/100 "
@@ -1317,6 +1327,16 @@ def main():
         daemon=True
     ).start()
     log.info(f"📊 Dashboard: http://0.0.0.0:{PORT}")
+
+    # Prime Gold/Silver price cache at startup
+    log.info("Priming Gold/Silver price cache...")
+    for sym in ("XAU-USD","XAG-USD"):
+        p = get_price(sym)
+        if p:
+            state["last_prices"][sym] = p
+            log.info(f"  {ASSETS[sym]['color']} {sym}: ${p:,.4f} (primed)")
+        else:
+            log.warning(f"  {sym}: Could not prime price cache")
 
     # Main loop
     while True:
