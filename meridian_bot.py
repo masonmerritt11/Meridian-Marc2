@@ -830,14 +830,27 @@ def open_position(symbol: str, score_data: dict, price: float):
         return
     size = risk_usd / stop_dist
 
-    # Sanity cap — size in units, not dollars
-    # XRP: max 5000 units, BTC: max 0.5, ETH: max 5, Gold: max 5oz, Oil: max 50 barrels
-    MAX_SIZE = {"BTC-USD":0.5,"ETH-USD":5.0,"XRP-USD":5000,
-                "XAU-USD":5.0,"XAG-USD":500,"OIL-USD":50}
-    max_s = MAX_SIZE.get(symbol, 9999)
-    if size > max_s:
-        log.info(f"  {symbol}: Size capped at {max_s} (was {size:.2f})")
-        size = max_s
+    # ── POSITION SIZING — 1 CONTRACT PER TRADE ──────────────
+    # Trade exactly like manual trading:
+    # Always 1 contract. Stop loss defines the dollar risk.
+    # No complex margin math — Coinbase handles margin automatically.
+    # The account just needs enough to cover the margin hold.
+    #
+    # Contract sizes (units per contract):
+    #   BTC-USD: 0.01 BTC  | ETH-USD: 0.10 ETH  | XRP-USD: 500 XRP
+    #   XAU-USD: 1 troy oz | XAG-USD: 50 troy oz | OIL-USD: 10 barrels
+    UNITS_PER_CONTRACT = {
+        "BTC-USD": 0.01, "ETH-USD": 0.10, "XRP-USD": 500,
+        "XAU-USD": 1,    "XAG-USD": 50,   "OIL-USD": 10,
+    }
+    units_per = UNITS_PER_CONTRACT.get(symbol, 1)
+    size      = units_per  # always exactly 1 contract
+
+    # Dollar risk on this trade = stop distance × contract size
+    dollar_risk = abs(price - score_data["stop"]) * units_per
+    log.info(f"  {symbol}: 1 contract | "
+             f"stop distance ${abs(price-score_data['stop']):.4f} | "
+             f"dollar risk ~${dollar_risk:.2f}")
 
     # Check drawdown limits
     daily_loss = state["daily_start_bal"] - state["account_balance"]
