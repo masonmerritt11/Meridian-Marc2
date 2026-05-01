@@ -119,6 +119,15 @@ UNITS_PER_CONTRACT = {
     "XAU-USD": 1,     "XAG-USD": 50,    "OIL-USD": 10,
 }
 
+# Actual futures product IDs used for orders and candles
+# Crypto: perpetuals (no expiry, tracks spot with funding rate)
+# Commodities: monthly contracts (resolved dynamically)
+FUTURES_PRODUCT = {
+    "BTC-USD": "BIT-PERP",   # nano BTC perp, 0.01 BTC/contract
+    "ETH-USD": "ETH-PERP",   # nano ETH perp, 0.10 ETH/contract
+    "XRP-USD": None,          # no XRP perp — use monthly XRL
+}
+
 # Real margin per contract confirmed from Coinbase account
 MARGIN_PER_CONTRACT = {
     "BTC-USD": 762,  "ETH-USD": 225,  "XRP-USD": 250,
@@ -326,10 +335,13 @@ def get_candles(symbol: str, granularity: str = "auto", limit: int = 100) -> lis
         granularity = "FIVE_MINUTE" if symbol in CRYPTO_ASSETS else "ONE_HOUR"
     limit = min(limit, 300)
 
-    # Crypto — direct product
+    # Crypto — use futures PERP product for candles, not spot
     if symbol in CRYPTO_ASSETS:
+        # Map to actual futures product ID
+        perp_id = FUTURES_PRODUCT.get(symbol)
+        candle_product = perp_id if perp_id else symbol
         try:
-            path = (f"/api/v3/brokerage/market/products/{symbol}/candles"
+            path = (f"/api/v3/brokerage/market/products/{candle_product}/candles"
                     f"?granularity={granularity}&limit={limit}")
             raw  = cb_get(path).get("candles",[])
             if raw:
@@ -824,15 +836,36 @@ def fetch_macro() -> dict:
 # ══════════════════════════════════════════════════════════
 # ORDER EXECUTION
 # ══════════════════════════════════════════════════════════
+def get_futures_product_id(symbol: str) -> str:
+    """Get the actual Coinbase futures product ID for ordering."""
+    # Crypto perps
+    perp = FUTURES_PRODUCT.get(symbol)
+    if perp:
+        return perp
+    # XRP monthly
+    if symbol == "XRP-USD":
+        now = datetime.datetime.now()
+        mon_names = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
+                     7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC"}
+        return f"XRL-{now.day:02d}{mon_names[now.month]}{str(now.year)[-2:]}-CDE"
+    # Commodities — use already-resolved candle product IDs
+    base = FUTURES_BASE.get(symbol)
+    if base:
+        ids = get_futures_ids(base)
+        return ids[0] if ids else symbol
+    return symbol
+
+
 def place_order(symbol: str, side: str, size: float, price: float) -> str:
-    oid = str(uuid.uuid4())[:8]
+    oid        = str(uuid.uuid4())[:8]
+    product_id = get_futures_product_id(symbol)
     if SAFETY["paper_mode"]:
-        log.info(f"  [PAPER] {side.upper()} {symbol} size={size:.4f} @ ${price:.4f}")
+        log.info(f"  [PAPER] {side.upper()} {product_id} size={size:.4f} @ ${price:.4f}")
         return oid
     try:
         body = {
             "client_order_id": oid,
-            "product_id":      symbol,
+            "product_id":      product_id,
             "side":            side.upper(),
             "order_configuration": {
                 "market_market_ioc": {"quote_size": str(round(size*price,2))}
