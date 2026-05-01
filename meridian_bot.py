@@ -971,10 +971,6 @@ def close_position(symbol: str, pos: dict, price: float, reason: str):
     state["account_balance"] += pnl
     state["total_pnl"]       += pnl
     state["peak_balance"]     = max(state["peak_balance"], state["account_balance"])
-    if pos["portfolio"] == "crypto":
-        state["crypto_balance"] += pnl
-    else:
-        state["commodity_balance"] += pnl
 
     if pnl > 0: state["wins"]   += 1
     else:       state["losses"] += 1
@@ -1193,16 +1189,12 @@ def build_dashboard() -> str:
     tot     = wins + losses
     wr      = wins/tot*100 if tot>0 else 0
     dd      = (state["peak_balance"]-bal)/state["peak_balance"]*100
-    cb      = state["crypto_balance"]
-    cob     = state["commodity_balance"]
     mode    = "📄 PAPER" if SAFETY["paper_mode"] else "💰 LIVE"
     now     = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     open_pos= state["open_positions"]
     recent  = list(reversed(state["trade_log"][-20:]))
 
     pnl_col = "#00d17a" if pnl >= 0 else "#ff4757"
-    cp_col  = "#00d17a" if cp  >= 0 else "#ff4757"
-    cop_col = "#00d17a" if cop >= 0 else "#ff4757"
 
     pos_rows = ""
     for sym, pos in open_pos.items():
