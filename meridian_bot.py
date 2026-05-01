@@ -68,7 +68,7 @@ def get_tier(score: int) -> Optional[dict]:
 SAFETY = {
     "paper_mode":           True,
     "max_trades_per_day":   6,
-    "max_open_positions":   3,
+    "max_open_positions":   2,    # max 2 — margin limits at $500 account
     "max_daily_loss_pct":   0.20,   # halt if down 20% on day
     "max_drawdown_pct":     0.40,   # halt if down 40% from peak
     "min_rr_ratio":         1.3,    # minimum risk:reward — 1.3 for ranging, higher for trends
@@ -118,6 +118,12 @@ TRADE_TARGETS = {
 UNITS_PER_CONTRACT = {
     "BTC-USD": 0.01,  "ETH-USD": 0.10,  "XRP-USD": 500,
     "XAU-USD": 1,     "XAG-USD": 50,    "OIL-USD": 10,
+}
+
+# Real margin per contract confirmed from Coinbase account
+MARGIN_PER_CONTRACT = {
+    "BTC-USD": 762,  "ETH-USD": 225,  "XRP-USD": 250,
+    "XAU-USD": 165,  "XAG-USD": 430,  "OIL-USD": 150,
 }
 
 # ══════════════════════════════════════════════════════════
@@ -179,6 +185,7 @@ state = {
     "losses":             0,
     "total_trades":       0,
     "open_positions":     {},
+    "margin_used":        0.0,   # total margin currently deployed
     "trade_log":          [],
     "last_reset":         None,
     "global_halt":        False,
@@ -913,10 +920,19 @@ def open_position(symbol: str, score_data: dict, price: float):
         state["halt_reason"] = f"Drawdown {dd:.1%}"
         return
 
+    # Final margin check before placing order
+    margin_needed  = MARGIN_PER_CONTRACT.get(symbol, 200)
+    current_margin = sum(MARGIN_PER_CONTRACT.get(s,200) for s in state["open_positions"])
+    if current_margin + margin_needed > balance * 0.95:  # keep 5% buffer
+        log.info(f"  {symbol}: SKIP — margin ${margin_needed} would exceed available "
+                 f"(used ${current_margin} + need ${margin_needed} > ${balance*0.95:.0f})")
+        return
+
     oid = place_order(symbol, "buy" if direction=="long" else "sell", size, price)
 
     state["open_positions"][symbol] = {
         "side":         direction,
+        "margin":       MARGIN_PER_CONTRACT.get(symbol, 200),
         "entry":        price,
         "stop":         score_data["stop"],
         "target":       score_data["target"],
@@ -1097,6 +1113,14 @@ def scan():
     if n_open >= SAFETY["max_open_positions"]:
         log.info(f"Max positions open ({n_open}) — skipping entries")
         return
+
+    # Margin check — don't open if we can't afford it
+    margin_used = sum(
+        MARGIN_PER_CONTRACT.get(sym, 200)
+        for sym in state["open_positions"]
+    )
+    margin_avail = state["account_balance"] - margin_used
+    log.info(f"  Margin used: ${margin_used} | Available: ${margin_avail:.0f}")
     if state["trades_today"] >= SAFETY["max_trades_per_day"]:
         log.info(f"Daily trade limit hit ({state['trades_today']}) — done for today")
         return
