@@ -82,6 +82,45 @@ SAFETY = {
 }
 
 # ══════════════════════════════════════════════════════════
+# FEES & MINIMUM PROFIT THRESHOLDS
+# ══════════════════════════════════════════════════════════
+# Coinbase futures: $0.20 per contract per side minimum
+# Round trip (entry + exit) = $0.40 minimum per trade
+# A trade is not worth taking if expected profit < fees
+
+FEES = {
+    "per_side":     4.71,   # $4.71 per contract per side (confirmed Gold rate)
+    "round_trip":   9.42,   # total cost to open and close (2 x $4.71)
+    "min_profit":   5.00,   # minimum NET profit after fees to be worth trading
+}
+
+# Note: fees may vary slightly by asset — $4.71 confirmed for Gold.
+# Using same rate for all assets as conservative estimate.
+# Real fee = 0.05% of notional + NFA/exchange fees
+
+# Fixed dollar profit targets per asset — matches real trading style
+# "I try to make about $20 before exiting"
+# Stop is set at half the target distance for 2:1 R:R
+# Targets set so net profit after $9.42 round-trip fees is meaningful
+# Minimum target = fees ($9.42) + min_profit ($5) = $14.42 minimum
+# Targets below are what you actually aim for — bot checks net profit automatically
+TRADE_TARGETS = {
+    #          target   stop     net after fees
+    "BTC-USD": (30.00,  15.00),  # net $20.58 after fees
+    "ETH-USD": (25.00,  12.50),  # net $15.58 after fees
+    "XRP-USD": (25.00,  12.50),  # net $15.58 after fees
+    "XAU-USD": (25.00,  12.50),  # net $15.58 after fees — Gold confirmed $4.71/side
+    "XAG-USD": (30.00,  15.00),  # net $20.58 after fees — Silver higher notional
+    "OIL-USD": (25.00,  12.50),  # net $15.58 after fees
+}
+
+# Units per contract — to convert dollar targets to price levels
+UNITS_PER_CONTRACT = {
+    "BTC-USD": 0.01,  "ETH-USD": 0.10,  "XRP-USD": 500,
+    "XAU-USD": 1,     "XAG-USD": 50,    "OIL-USD": 10,
+}
+
+# ══════════════════════════════════════════════════════════
 # SCORING WEIGHTS
 # ══════════════════════════════════════════════════════════
 # Total possible = 100 points
@@ -649,24 +688,32 @@ def score_setup(symbol: str, candles: list, price: float,
     breakdown["vol"] = vol_pts
     notes.append(f"vol={vol_pts}")
 
-    # ── 8. R:R CLEAN (+10) ──────────────────────────────
-    # Use 1H ATR for stop/target — meaningful sizing, not 5-min noise
+    # ── 8. FIXED DOLLAR TARGETS + FEE CHECK ─────────────
+    # Fixed profit targets matching real trading style (~$20/trade)
+    # Stop = half target = always 2:1 R:R
+    # Net profit must exceed $0.40 round-trip fees
+    tgt_d, stop_d = TRADE_TARGETS.get(symbol, (20.00, 10.00))
+    units = UNITS_PER_CONTRACT.get(symbol, 1)
+    target_move = tgt_d  / units
+    stop_move   = stop_d / units
     if direction == "long":
-        stop   = sup - atr_htf * 1.0           # 1x hourly ATR below support
-        target = max(res, price + atr_htf * 2.5)  # 2.5x hourly ATR minimum target
+        stop   = price - stop_move
+        target = price + target_move
     else:
-        stop   = res + atr_htf * 1.0           # 1x hourly ATR above resistance
-        target = min(sup, price - atr_htf * 2.5)  # 2.5x hourly ATR minimum target
-    risk   = abs(price-stop)
-    reward = abs(target-price)
-    rr     = reward/risk if risk > 0 else 0
-    rr_pts = 0
-    if rr >= 2.5:    rr_pts = 10
-    elif rr >= 2.0:  rr_pts = 8
-    elif rr >= 1.5:  rr_pts = 5
+        stop   = price + stop_move
+        target = price - target_move
+    net_profit = tgt_d - FEES["round_trip"]
+    if net_profit < FEES["min_profit"]:
+        return {"score":0,"tier":None,"direction":direction,
+                "reason":f"Fee kill — net ${net_profit:.2f} < min ${FEES['min_profit']}",
+                "stop":stop,"target":target,"rr":2.0,"atr":atr_val,
+                "atr_entry":atr_val,"sup":sup,"res":res,"breakdown":breakdown}
+    rr     = abs(target-price) / abs(price-stop) if abs(price-stop) > 0 else 2.0
+    rr_pts = 10  # always full points — 2:1 R:R guaranteed with fixed targets
     score += rr_pts
     breakdown["rr"] = rr_pts
-    notes.append(f"rr={rr:.1f}({rr_pts})")
+    notes.append(f"target=${tgt_d}(net_${net_profit:.2f})")
+
 
     # ── NY SESSION BONUS (+10 bonus, not in base 100) ────
     ny_bonus = 0
@@ -701,8 +748,10 @@ def score_setup(symbol: str, candles: list, price: float,
         "stop":      stop,
         "target":    target,
         "rr":        rr,
-        "atr":       atr_htf,   # use HTF ATR for position management
-        "atr_entry": atr_val,   # entry TF ATR
+        "atr":       atr_htf if candles_htf else atr_val,
+        "atr_entry": atr_val,
+        "target_dollars": TRADE_TARGETS.get(symbol,(20,10))[0],
+        "stop_dollars":   TRADE_TARGETS.get(symbol,(20,10))[1],
         "sup":       sup,
         "res":       res,
         "regime":    regime,
