@@ -28,9 +28,8 @@ EMAIL_TO    = os.environ.get("EMAIL_TO", "")
 EMAIL_PASS  = os.environ.get("EMAIL_PASS", "")
 PORT        = int(os.environ.get("PORT", 8080))
 
-# Dual portfolio balances
-CRYPTO_START    = float(os.environ.get("CRYPTO_BALANCE",    "250"))
-COMMODITY_START = float(os.environ.get("COMMODITY_BALANCE", "250"))
+# Single account balance
+ACCOUNT_START = float(os.environ.get("ACCOUNT_BALANCE", "500"))
 
 # ══════════════════════════════════════════════════════════
 # ASSETS
@@ -172,14 +171,10 @@ def macro_allows(symbol: str, direction: str, macro: dict) -> tuple[bool, str]:
 # STATE
 # ══════════════════════════════════════════════════════════
 state = {
-    "account_balance":    CRYPTO_START + COMMODITY_START,
-    "crypto_balance":     CRYPTO_START,
-    "commodity_balance":  COMMODITY_START,
-    "peak_balance":       CRYPTO_START + COMMODITY_START,
-    "daily_start_bal":    CRYPTO_START + COMMODITY_START,
+    "account_balance":    ACCOUNT_START,
+    "peak_balance":       ACCOUNT_START,
+    "daily_start_bal":    ACCOUNT_START,
     "total_pnl":          0.0,
-    "crypto_pnl":         0.0,
-    "commodity_pnl":      0.0,
     "trades_today":       0,
     "wins":               0,
     "losses":             0,
@@ -849,10 +844,8 @@ def place_order(symbol: str, side: str, size: float, price: float) -> str:
         log.error(f"Order failed {symbol}: {e}")
         return oid
 
-def get_balance(portfolio: str = "total") -> float:
+def get_balance() -> float:
     if SAFETY["paper_mode"]:
-        if portfolio == "crypto":    return state["crypto_balance"]
-        if portfolio == "commodity": return state["commodity_balance"]
         return state["account_balance"]
     try:
         data = cb_get("/api/v3/brokerage/accounts")
@@ -876,7 +869,7 @@ def open_position(symbol: str, score_data: dict, price: float):
 
     direction = score_data["direction"]
     portfolio = "crypto" if symbol in CRYPTO_ASSETS else "commodity"
-    balance   = get_balance(portfolio)
+    balance   = get_balance()
 
     # Size based on tier risk %
     risk_pct  = tier["risk_pct"]
@@ -951,7 +944,7 @@ def open_position(symbol: str, score_data: dict, price: float):
         "ny_hit":       score_data.get("ny_hit",False),
         "order_id":     oid,
         "opened_at":    datetime.datetime.now().isoformat(),
-        "portfolio":    portfolio,
+
     }
     state["trades_today"] += 1
 
@@ -980,12 +973,10 @@ def close_position(symbol: str, pos: dict, price: float, reason: str):
     state["peak_balance"]     = max(state["peak_balance"], state["account_balance"])
     if pos["portfolio"] == "crypto":
         state["crypto_balance"] += pnl
-        state["crypto_pnl"]     += pnl
     else:
         state["commodity_balance"] += pnl
-        state["commodity_pnl"]     += pnl
 
-    if pnl > 0: state["wins"] += 1
+    if pnl > 0: state["wins"]   += 1
     else:       state["losses"] += 1
     state["total_trades"] += 1
 
@@ -1065,8 +1056,7 @@ def check_exits(prices: dict):
                 pnl  = (price-entry)*half if side=="long" else (entry-price)*half
                 state["account_balance"] += pnl
                 state["total_pnl"] += pnl
-                key = "crypto_pnl" if pos.get("portfolio")=="crypto" else "commodity_pnl"
-                state[key] += pnl
+            
                 pos["size_remaining"] = half
                 pos["partial_done"] = True
                 log.info(f"  {symbol}: 💰 Partial TP ${pnl:+.2f} at {r_moved:.1f}R")
@@ -1205,8 +1195,6 @@ def build_dashboard() -> str:
     dd      = (state["peak_balance"]-bal)/state["peak_balance"]*100
     cb      = state["crypto_balance"]
     cob     = state["commodity_balance"]
-    cp      = state["crypto_pnl"]
-    cop     = state["commodity_pnl"]
     mode    = "📄 PAPER" if SAFETY["paper_mode"] else "💰 LIVE"
     now     = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     open_pos= state["open_positions"]
@@ -1283,7 +1271,6 @@ body{{background:#08090b;color:#e2e8f0;font-family:'IBM Plex Mono',monospace;fon
 .dot{{width:7px;height:7px;border-radius:50%;background:#00d17a;animation:pulse 2s infinite;display:inline-block;margin-right:5px}}
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
 .grid5{{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:rgba(255,255,255,.05)}}
-.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.07)}}
 .stat{{background:#0e1117;padding:12px 16px}}
 .sl{{font-size:9px;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px}}
 .sv{{font-size:18px;font-weight:700}}
@@ -1312,22 +1299,6 @@ tr:hover td{{background:#141920}}
   <div class="stat"><div class="sl">Win Rate</div><div class="sv" style="color:#3b8bff">{wr:.1f}%<span style="font-size:11px;color:#475569"> {wins}W/{losses}L</span></div></div>
   <div class="stat"><div class="sl">Drawdown</div><div class="sv" style="color:{'#ff4757' if dd>10 else '#ffb800'}">{dd:.1f}%</div></div>
   <div class="stat"><div class="sl">Today</div><div class="sv">{state['trades_today']}<span style="font-size:11px;color:#475569">/{SAFETY['max_trades_per_day']} trades</span></div></div>
-</div>
-<div class="grid2">
-  <div class="stat"><div class="sl">🔵 Crypto Portfolio</div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-      <span class="sv" style="color:{'#00d17a' if cb>=CRYPTO_START else '#ff4757'}">${cb:,.2f}</span>
-      <span style="color:{cp_col}">${cp:+.2f}</span>
-      <span style="font-size:10px;color:#475569">started ${CRYPTO_START:.0f}</span>
-    </div>
-  </div>
-  <div class="stat"><div class="sl">🟡 Commodity Portfolio</div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-      <span class="sv" style="color:{'#00d17a' if cob>=COMMODITY_START else '#ff4757'}">${cob:,.2f}</span>
-      <span style="color:{cop_col}">${cop:+.2f}</span>
-      <span style="font-size:10px;color:#475569">started ${COMMODITY_START:.0f}</span>
-    </div>
-  </div>
 </div>
 <div class="body">
   <div class="card">
@@ -1398,8 +1369,6 @@ def send_email():
         <h2>Meridian v3 Daily Summary</h2>
         <p>Balance: <b>${state['account_balance']:,.2f}</b> | P&L: ${state['total_pnl']:+.2f}</p>
         <p>Win Rate: {wr:.1f}% ({wins}W/{losses}L) | Trades today: {state['trades_today']}</p>
-        <p>Crypto: ${state['crypto_balance']:,.2f} ({state['crypto_pnl']:+.2f})</p>
-        <p>Commodity: ${state['commodity_balance']:,.2f} ({state['commodity_pnl']:+.2f})</p>
         <p>Macro: {state.get('macro_context',{})}</p>
         """
         msg = MIMEMultipart("alternative")
@@ -1425,7 +1394,7 @@ def main():
     log.info(f"  Tiers: T1≥50 (3% risk) | T2≥65 (6%) | T3≥80 (12%)")
     log.info(f"  Targets: {SAFETY['target_trades_per_day']} trades/day")
     log.info(f"  Exits: Partial TP at 1.5R | BE at 1R | Trail remainder")
-    log.info(f"  Crypto:    ${CRYPTO_START:.0f} | Commodity: ${COMMODITY_START:.0f}")
+    log.info(f"  Account:   ${ACCOUNT_START:.0f}")
     log.info("="*60)
 
     # Dashboard
