@@ -100,17 +100,27 @@ FEES = {
 # Fixed dollar profit targets per asset — matches real trading style
 # "I try to make about $20 before exiting"
 # Stop is set at half the target distance for 2:1 R:R
-# Targets set so net profit after $9.42 round-trip fees is meaningful
-# Minimum target = fees ($9.42) + min_profit ($5) = $14.42 minimum
-# Targets below are what you actually aim for — bot checks net profit automatically
+# Fixed dollar P&L targets per trade (1 contract)
+# These are the ACTUAL dollar profit/loss on the trade
+# Price move = target / units_per_contract
+# e.g. Gold: $25 target / 1oz = $25 price move needed
+#      Oil:  $25 target / 10 barrels = $2.50/barrel move needed
+#      XRP:  $25 target / 500 XRP = $0.05/XRP move needed
+#      ETH:  $25 target / 0.10 ETH = $250/ETH move — too much!
+#
+# For crypto (BTC/ETH) the per-contract dollar value is high,
+# so we target smaller moves but they happen faster.
+# ETH: target $12, stop $6 → ETH needs to move $120/$60 — realistic
+# BTC: target $20, stop $10 → BTC needs to move $2000/$1000 — realistic
+
 TRADE_TARGETS = {
-    #          target   stop     net after fees
-    "BTC-USD": (30.00,  15.00),  # net $20.58 after fees
-    "ETH-USD": (25.00,  12.50),  # net $15.58 after fees
-    "XRP-USD": (25.00,  12.50),  # net $15.58 after fees
-    "XAU-USD": (25.00,  12.50),  # net $15.58 after fees — Gold confirmed $4.71/side
-    "XAG-USD": (30.00,  15.00),  # net $20.58 after fees — Silver higher notional
-    "OIL-USD": (25.00,  12.50),  # net $15.58 after fees
+    #          target  stop    net after $9.42 fees
+    "BTC-USD": (20.00,  10.00), # BTC needs $2000 move / 0.01 = $20 P&L ✓
+    "ETH-USD": (12.00,   6.00), # ETH needs $120 move / 0.10 = $12 P&L ✓
+    "XRP-USD": (25.00,  12.50), # XRP needs $0.05 move / 500 = $25 P&L ✓
+    "XAU-USD": (25.00,  12.50), # Gold needs $25 move / 1oz = $25 P&L ✓
+    "XAG-USD": (30.00,  15.00), # Silver needs $0.60 move / 50oz = $30 P&L ✓
+    "OIL-USD": (25.00,  12.50), # Oil needs $2.50 move / 10 bbl = $25 P&L ✓
 }
 
 # Units per contract — to convert dollar targets to price levels
@@ -296,6 +306,9 @@ def get_price(symbol: str) -> Optional[float]:
             p = float(d.get("price",0))
             if p > 0:
                 log.info(f"  {symbol}: ${p:.4f} via {pid}")
+                # Update cache so we have a fresh fallback
+                state[f"av_{symbol}"] = p
+                state[f"av_t_{symbol}"] = datetime.datetime.now().isoformat()
                 return p
         except Exception:
             continue
