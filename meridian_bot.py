@@ -87,15 +87,21 @@ SAFETY = {
 # Round trip (entry + exit) = $0.40 minimum per trade
 # A trade is not worth taking if expected profit < fees
 
-FEES = {
-    "per_side":     4.71,   # $4.71 per contract per side (confirmed Gold rate)
-    "round_trip":   9.42,   # total cost to open and close (2 x $4.71)
-    "min_profit":   5.00,   # minimum NET profit after fees to be worth trading
+# All fees confirmed from Coinbase screenshots May 3 2026
+FEES_PER_ASSET = {
+    "BTC-USD": {"per_side": 0.70, "round_trip": 1.40},   # confirmed
+    "ETH-USD": {"per_side": 0.31, "round_trip": 0.62},   # confirmed
+    "XRP-USD": {"per_side": 0.64, "round_trip": 1.28},   # confirmed
+    "XAU-USD": {"per_side": 3.17, "round_trip": 6.34},   # confirmed (was $4.71 old)
+    "XAG-USD": {"per_side": 2.65, "round_trip": 5.30},   # confirmed
+    "OIL-USD": {"per_side": 0.81, "round_trip": 1.62},   # confirmed
 }
 
-# Note: fees may vary slightly by asset — $4.71 confirmed for Gold.
-# Using same rate for all assets as conservative estimate.
-# Real fee = 0.05% of notional + NFA/exchange fees
+FEES = {
+    "per_side":     4.71,   # default (Gold rate — most conservative)
+    "round_trip":   9.42,   # default round trip
+    "min_profit":   2.00,   # minimum NET profit after fees
+}
 
 # Fixed dollar profit targets per asset — matches real trading style
 # "I try to make about $20 before exiting"
@@ -116,7 +122,7 @@ FEES = {
 TRADE_TARGETS = {
     #          target  stop    net after $9.42 fees
     "BTC-USD": (20.00,  10.00), # BTC needs $2000 move / 0.01 = $20 P&L ✓
-    "ETH-USD": (12.00,   6.00), # ETH needs $120 move / 0.10 = $12 P&L ✓
+    "ETH-USD": (20.00,  10.00), # ETH needs $200 move / 0.10 = $20 P&L ✓  net $10.58
     "XRP-USD": (25.00,  12.50), # XRP needs $0.05 move / 500 = $25 P&L ✓
     "XAU-USD": (25.00,  12.50), # Gold needs $25 move / 1oz = $25 P&L ✓
     "XAG-USD": (30.00,  15.00), # Silver needs $0.60 move / 50oz = $30 P&L ✓
@@ -140,8 +146,8 @@ FUTURES_PRODUCT = {
 
 # Real margin per contract confirmed from Coinbase account
 MARGIN_PER_CONTRACT = {
-    "BTC-USD": 762,  "ETH-USD": 225,  "XRP-USD": 250,
-    "XAU-USD": 165,  "XAG-USD": 430,  "OIL-USD": 150,
+    "BTC-USD": 193,  "ETH-USD": 58,   "XRP-USD": 261,  # all confirmed from Coinbase
+    "XAU-USD": 252,  "XAG-USD": 445,  "OIL-USD": 141,  # all confirmed from Coinbase
 }
 
 # ══════════════════════════════════════════════════════════
@@ -305,12 +311,15 @@ def get_price(symbol: str) -> Optional[float]:
             d = cb_get(f"/api/v3/brokerage/market/products/{pid}")
             p = float(d.get("price",0))
             if p > 0:
-                log.info(f"  {symbol}: ${p:.4f} via {pid}")
-                # Update cache so we have a fresh fallback
-                state[f"av_{symbol}"] = p
-                state[f"av_t_{symbol}"] = datetime.datetime.now().isoformat()
+                # Always update cache with fresh Coinbase price
+                state["last_prices"][symbol] = p
+                state[f"av_{symbol}"]        = p
+                state[f"av_t_{symbol}"]      = datetime.datetime.now().isoformat()
                 return p
-        except Exception:
+            else:
+                log.warning(f"  {symbol}: {pid} returned price=0")
+        except Exception as e:
+            log.warning(f"  {symbol}: {pid} failed — {e}")
             continue
     # AV fallback for gold/silver (cached 6h)
     if symbol in {"XAU-USD","XAG-USD"}:
@@ -338,8 +347,8 @@ def get_price(symbol: str) -> Optional[float]:
     # Absolute last resort for Gold — use known approximate price
     # This prevents Gold from being completely dead
     if symbol == "XAU-USD":
-        log.warning("  XAU-USD: using fallback estimate $3300")
-        return 3300.0  # approximate — will be replaced when AV cache refreshes
+        log.warning("  XAU-USD: using fallback estimate $4620")
+        return 4620.0  # approximate current Gold price (May 2026)
     return None
 
 def get_candles(symbol: str, granularity: str = "auto", limit: int = 100) -> list:
@@ -729,17 +738,19 @@ def score_setup(symbol: str, candles: list, price: float,
     else:
         stop   = price + stop_move
         target = price - target_move
-    net_profit = tgt_d - FEES["round_trip"]
+    asset_fees  = FEES_PER_ASSET.get(symbol, FEES)
+    round_trip  = asset_fees["round_trip"]
+    net_profit  = tgt_d - round_trip
     if net_profit < FEES["min_profit"]:
         return {"score":0,"tier":None,"direction":direction,
-                "reason":f"Fee kill — net ${net_profit:.2f} < min ${FEES['min_profit']}",
+                "reason":f"Fee kill — net ${net_profit:.2f} < min ${FEES['min_profit']} (fees ${round_trip:.2f})",
                 "stop":stop,"target":target,"rr":2.0,"atr":atr_val,
                 "atr_entry":atr_val,"sup":sup,"res":res,"breakdown":breakdown}
     rr     = abs(target-price) / abs(price-stop) if abs(price-stop) > 0 else 2.0
     rr_pts = 10  # always full points — 2:1 R:R guaranteed with fixed targets
     score += rr_pts
     breakdown["rr"] = rr_pts
-    notes.append(f"target=${tgt_d}(net_${net_profit:.2f})")
+    notes.append(f"target=${tgt_d}(fees_${round_trip:.2f}_net_${net_profit:.2f})")
 
 
     # ── NY SESSION BONUS (+10 bonus, not in base 100) ────
@@ -1173,11 +1184,11 @@ def scan():
 
         # Fetch candles — 5min for entry signals, 1h for risk sizing
         if symbol in CRYPTO_ASSETS:
-            candles_entry = get_candles(symbol, granularity="FIVE_MINUTE",  limit=100)
-            candles_1h    = get_candles(symbol, granularity="ONE_HOUR",     limit=60)
+            candles_entry = get_candles(symbol, granularity="FIVE_MINUTE",  limit=80)
+            candles_1h    = get_candles(symbol, granularity="ONE_HOUR",     limit=40)
         else:
-            candles_entry = get_candles(symbol, granularity="ONE_HOUR",     limit=80)
-            candles_1h    = get_candles(symbol, granularity="SIX_HOUR",     limit=40)
+            candles_entry = get_candles(symbol, granularity="ONE_HOUR",     limit=60)
+            candles_1h    = get_candles(symbol, granularity="SIX_HOUR",     limit=20)
         candles = candles_entry  # primary for scoring
         if candles_1h:
             log.info(f"  {symbol}: {len(candles_entry)} entry candles + {len(candles_1h)} HTF candles")
