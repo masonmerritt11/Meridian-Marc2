@@ -265,6 +265,36 @@ EXPIRY_DAYS  = {
 GOLD_MONTHS  = {2,4,6,8,10,12}  # Gold only trades even months
 
 def get_futures_ids(base: str) -> list:
+    """
+    Get active futures contract IDs directly from Coinbase API.
+    No more guessing expiry dates — query what's actually available.
+    """
+    try:
+        data = cb_get("/api/v3/brokerage/market/products?product_type=FUTURE&limit=250")
+        products = data.get("products", [])
+        matching = []
+        for p in products:
+            pid    = p.get("product_id", "")
+            status = p.get("status", "online")
+            if pid.startswith(base + "-") and pid.endswith("-CDE"):
+                if status != "delisted":
+                    matching.append(pid)
+        if matching:
+            matching.sort()  # alphabetical ≈ nearest expiry first
+            return matching[:4]
+    except Exception as e:
+        log.warning(f"  {base}: Coinbase product lookup failed — {e}")
+
+    # Hardcoded fallback — update these when contracts roll
+    fallbacks = {
+        "GOL": ["GOL-27MAY26-CDE", "GOL-26JUN26-CDE", "GOL-26AUG26-CDE"],
+        "SLR": ["SLR-25JUN26-CDE", "SLR-25SEP26-CDE", "SLR-25NOV26-CDE"],
+        "NOL": ["NOL-18MAY26-CDE", "NOL-18JUN26-CDE", "NOL-16JUL26-CDE"],
+    }
+    return fallbacks.get(base, [])
+
+
+def _get_futures_ids_old(base: str) -> list:
     """Build list of candidate product IDs to try."""
     now = datetime.datetime.now()
     ids = []
