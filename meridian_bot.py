@@ -294,24 +294,6 @@ def get_futures_ids(base: str) -> list:
     return fallbacks.get(base, [])
 
 
-def _get_futures_ids_old(base: str) -> list:
-    """Build list of candidate product IDs to try."""
-    now = datetime.datetime.now()
-    ids = []
-    for delta in range(8):
-        m = now.month + delta
-        y = now.year + (m-1)//12
-        m = ((m-1)%12)+1
-        if base == "GOL" and m not in GOLD_MONTHS:
-            continue
-        exp = EXPIRY_DAYS.get(base,{}).get(m, 18)
-        if delta == 0 and now.day >= exp:
-            continue
-        ids.append(f"{base}-{exp:02d}{MON_NAMES[m]}{str(y)[-2:]}-CDE")
-        if len(ids) >= 4:
-            break
-    return ids
-
 # ══════════════════════════════════════════════════════════
 # PRICE & CANDLES
 # ══════════════════════════════════════════════════════════
@@ -1214,7 +1196,7 @@ def scan():
 
         # Fetch candles — 5min for entry signals, 1h for risk sizing
         if symbol in CRYPTO_ASSETS:
-            candles_entry = get_candles(symbol, granularity="FIVE_MINUTE",  limit=80)
+            candles_entry = get_candles(symbol, granularity="FIVE_MINUTE",  limit=60)
             candles_1h    = get_candles(symbol, granularity="ONE_HOUR",     limit=40)
         else:
             candles_entry = get_candles(symbol, granularity="ONE_HOUR",     limit=60)
