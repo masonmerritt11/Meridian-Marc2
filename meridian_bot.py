@@ -1148,7 +1148,8 @@ def scan():
 
     # Fetch all prices
     log.info("Fetching prices...")
-    for symbol in ASSETS:
+    for symbol in ["XAU-USD","OIL-USD","XAG-USD","XRP-USD","ETH-USD","BTC-USD"]:
+        if symbol not in ASSETS: continue
         try:
             p = get_price(symbol)
             if p and p > 0:
@@ -1185,9 +1186,21 @@ def scan():
 
     log.info("Scanning for setups...")
 
-    # Score every asset in both directions
+    # Scan commodities first, then crypto
+    # Commodities (Gold, Oil) are priority — better margin efficiency,
+    # lower correlation to each other, and your primary trading focus
+    SCAN_ORDER = [
+        "XAU-USD",  # Gold — priority 1
+        "OIL-USD",  # Oil  — priority 2
+        "XAG-USD",  # Silver — priority 3
+        "XRP-USD",  # XRP  — priority 4
+        "ETH-USD",  # ETH  — priority 5
+        "BTC-USD",  # BTC  — priority 6
+    ]
+
     best_setups = []
-    for symbol in ASSETS:
+    for symbol in SCAN_ORDER:
+        if symbol not in ASSETS: continue
         if symbol in state["open_positions"]:
             continue
         price = prices.get(symbol)
@@ -1224,7 +1237,12 @@ def scan():
                          f"— {s.get('reason','below threshold')[:50]}")
 
     # Sort by score — best first
-    best_setups.sort(key=lambda x: x[2]["score"], reverse=True)
+    # Sort: commodities first within same tier, then by score
+    COMMODITY_BONUS = {"XAU-USD":0.5,"OIL-USD":0.4,"XAG-USD":0.3}
+    best_setups.sort(
+        key=lambda x: x[2]["score"] + COMMODITY_BONUS.get(x[0], 0),
+        reverse=True
+    )
 
     # Take trades — prioritize higher tiers
     taken = 0
