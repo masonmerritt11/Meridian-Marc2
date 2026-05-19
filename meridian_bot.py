@@ -1397,9 +1397,134 @@ tr:hover td{{background:#141920}}
     <tbody>{trade_rows}</tbody></table>
   </div>
 </div>
+  <!-- MANUAL TRADING PANEL -->
+  <div style="padding:14px;margin-top:4px">
+    <div style="background:#0e1117;border:1px solid rgba(255,255,255,.1);border-radius:10px;overflow:hidden">
+      <div style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em">📱 Manual Trade</span>
+        <span style="font-size:10px;color:#475569">{mode}</span>
+      </div>
+      <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+
+        <!-- OPEN TRADE -->
+        <div>
+          <div style="font-size:10px;color:#475569;margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">Open Position</div>
+          <form id="openForm" style="display:flex;flex-direction:column;gap:8px">
+            <select name="symbol" id="openSymbol" style="background:#141920;border:1px solid rgba(255,255,255,.1);color:#e2e8f0;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit">
+              <option value="XAU-USD">🟡 Gold (GOL)</option>
+              <option value="OIL-USD">🛢️ Oil (NOL)</option>
+              <option value="XAG-USD">⚪ Silver (SLR)</option>
+              <option value="XRP-USD">💧 XRP</option>
+              <option value="ETH-USD">🔵 ETH</option>
+              <option value="BTC-USD">🟠 BTC</option>
+            </select>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <button type="button" onclick="openTrade('long')"
+                style="background:#00d17a;color:#000;border:none;padding:12px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">
+                ▲ Buy Long
+              </button>
+              <button type="button" onclick="openTrade('short')"
+                style="background:#ff4757;color:#fff;border:none;padding:12px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">
+                ▼ Sell Short
+              </button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div>
+                <div style="font-size:9px;color:#475569;margin-bottom:4px">Stop Price (opt)</div>
+                <input type="number" id="openStop" step="0.01" placeholder="Auto"
+                  style="width:100%;background:#141920;border:1px solid rgba(255,255,255,.1);color:#e2e8f0;padding:9px 10px;border-radius:6px;font-size:12px;font-family:inherit;box-sizing:border-box">
+              </div>
+              <div>
+                <div style="font-size:9px;color:#475569;margin-bottom:4px">Target Price (opt)</div>
+                <input type="number" id="openTarget" step="0.01" placeholder="Auto"
+                  style="width:100%;background:#141920;border:1px solid rgba(255,255,255,.1);color:#e2e8f0;padding:9px 10px;border-radius:6px;font-size:12px;font-family:inherit;box-sizing:border-box">
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- MANAGE OPEN POSITIONS -->
+        <div>
+          <div style="font-size:10px;color:#475569;margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">Manage Positions</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            {''.join([f"""
+            <div style="background:#141920;border-radius:8px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between">
+              <div>
+                <div style="font-size:12px;font-weight:700;color:{'#00d17a' if p['side']=='long' else '#ff4757'}">{ASSETS[s]['color']} {s.replace('-USD','')} {p['side'].upper()}</div>
+                <div style="font-size:10px;color:#475569">Entry ${p['entry']:,.2f} · Stop ${p['stop']:,.2f}</div>
+              </div>
+              <button onclick="closeTrade('{s}')"
+                style="background:#ff4757;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">
+                Close
+              </button>
+            </div>""" for s,p in open_pos.items()]) or '<div style="color:#475569;font-size:12px;padding:20px 0;text-align:center">No open positions</div>'}
+            <!-- Update stop for any open position -->
+            {f"""<div style="margin-top:4px">
+              <div style="font-size:9px;color:#475569;margin-bottom:4px">Update Stop Price</div>
+              <div style="display:flex;gap:6px">
+                <select id="stopSymbol" style="flex:1;background:#141920;border:1px solid rgba(255,255,255,.1);color:#e2e8f0;padding:8px;border-radius:6px;font-size:12px;font-family:inherit">
+                  {''.join([f'<option value="{s}">{s.replace("-USD","")}</option>' for s in open_pos])}
+                </select>
+                <input type="number" id="newStop" step="0.01" placeholder="Price"
+                  style="flex:1;background:#141920;border:1px solid rgba(255,255,255,.1);color:#e2e8f0;padding:8px;border-radius:6px;font-size:12px;font-family:inherit">
+                <button onclick="updateStop()" style="background:#ffb800;color:#000;border:none;padding:8px 12px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Set</button>
+              </div>
+            </div>""" if open_pos else ""}
+          </div>
+        </div>
+
+      </div>
+      <!-- Status message -->
+      <div id="tradeMsg" style="margin:0 16px 14px;padding:10px 14px;border-radius:8px;font-size:12px;display:none"></div>
+    </div>
+  </div>
+
+<script>
+async function postTrade(data) {{
+  const resp = await fetch('/', {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+    body: new URLSearchParams(data).toString()}});
+  return await resp.json();
+}}
+function showMsg(msg, ok) {{
+  const el = document.getElementById('tradeMsg');
+  el.style.display = 'block';
+  el.style.background = ok ? 'rgba(0,209,122,.1)' : 'rgba(255,71,87,.1)';
+  el.style.color = ok ? '#00d17a' : '#ff4757';
+  el.style.border = `1px solid ${{ok ? 'rgba(0,209,122,.3)' : 'rgba(255,71,87,.3)'}}`;
+  el.textContent = msg;
+  setTimeout(() => {{ el.style.display='none'; if(ok) location.reload(); }}, 3000);
+}}
+async function openTrade(side) {{
+  const symbol = document.getElementById('openSymbol').value;
+  const stop   = document.getElementById('openStop').value;
+  const target = document.getElementById('openTarget').value;
+  const r = await postTrade({{action:'open', symbol, side, stop, target}});
+  showMsg(r.msg, r.ok);
+}}
+async function closeTrade(symbol) {{
+  if(!confirm(`Close ${{symbol}}?`)) return;
+  const r = await postTrade({{action:'close', symbol}});
+  showMsg(r.msg, r.ok);
+}}
+async function updateStop() {{
+  const symbol = document.getElementById('stopSymbol').value;
+  const stop   = document.getElementById('newStop').value;
+  if(!stop) return showMsg('Enter a stop price', false);
+  const r = await postTrade({{action:'update_stop', symbol, stop}});
+  showMsg(r.msg, r.ok);
+}}
+</script>
+
 <div style="padding:6px 20px;text-align:center;font-size:9px;color:#2d3748">
   Meridian v3.0 · {mode} · ${bal:,.2f} · Tier 1≥50 / Tier 2≥65 / Tier 3≥80
-</div></body></html>"""
+</div>
+
+<!-- PWA manifest for iPhone home screen -->
+<link rel="manifest" href="data:application/json,{{'name':'Meridian','short_name':'Meridian','start_url':'/','display':'standalone','background_color':'%2308090b','theme_color':'%23ff6b00','icons':[{{'src':'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⟡</text></svg>','sizes':'any','type':'image/svg+xml'}}]}}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Meridian">
+</body></html>"""
 
 class DashHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -1413,6 +1538,89 @@ class DashHandler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def do_POST(self):
+        """Handle manual trade submissions from dashboard."""
+        import urllib.parse
+        try:
+            length  = int(self.headers.get("Content-Length", 0))
+            body    = self.rfile.read(length).decode()
+            params  = dict(urllib.parse.parse_qsl(body))
+            action  = params.get("action","")
+            symbol  = params.get("symbol","")
+            side    = params.get("side","")
+            size    = float(params.get("size", 1))
+            stop    = float(params.get("stop", 0)) if params.get("stop") else None
+            target  = float(params.get("target", 0)) if params.get("target") else None
+
+            result  = {"ok": False, "msg": "Unknown action"}
+
+            if action == "open" and symbol and side:
+                price = state["last_prices"].get(symbol, 0)
+                if price <= 0:
+                    result = {"ok": False, "msg": f"No price for {symbol}"}
+                elif symbol in state["open_positions"]:
+                    result = {"ok": False, "msg": f"{symbol} already open"}
+                else:
+                    units = UNITS_PER_CONTRACT.get(symbol, 1)
+                    tgt_d, stop_d = TRADE_TARGETS.get(symbol, (25, 12.50))
+                    stop_price   = stop   if stop   else (price - stop_d/units  if side=="long" else price + stop_d/units)
+                    target_price = target if target else (price + tgt_d/units   if side=="long" else price - tgt_d/units)
+                    oid = place_order(symbol, "buy" if side=="long" else "sell", units*size, price)
+                    state["open_positions"][symbol] = {
+                        "side":           side,
+                        "entry":          price,
+                        "stop":           stop_price,
+                        "target":         target_price,
+                        "size":           units * size,
+                        "size_remaining": units * size,
+                        "score":          99,
+                        "tier":           "Manual",
+                        "tier_num":       0,
+                        "rr":             abs(target_price-price)/abs(price-stop_price) if abs(price-stop_price)>0 else 2.0,
+                        "atr":            abs(price-stop_price),
+                        "stop_moved_be":  False,
+                        "partial_done":   False,
+                        "reason":         "Manual entry via dashboard",
+                        "order_id":       oid,
+                        "opened_at":      datetime.datetime.now().isoformat(),
+                        "orig_stop_dist": abs(price-stop_price),
+                        "manual":         True,
+                    }
+                    state["trades_today"] += 1
+                    log.info(f"📱 MANUAL {side.upper()} {symbol} @ ${price:.4f} stop=${stop_price:.4f} target=${target_price:.4f}")
+                    result = {"ok": True, "msg": f"Opened {side.upper()} {symbol} @ ${price:.4f}"}
+
+            elif action == "close" and symbol:
+                pos = state["open_positions"].get(symbol)
+                if not pos:
+                    result = {"ok": False, "msg": f"No open position for {symbol}"}
+                else:
+                    price = state["last_prices"].get(symbol, pos["entry"])
+                    close_position(symbol, pos, price, "Manual close via dashboard")
+                    result = {"ok": True, "msg": f"Closed {symbol} @ ${price:.4f}"}
+
+            elif action == "update_stop" and symbol:
+                pos = state["open_positions"].get(symbol)
+                if not pos:
+                    result = {"ok": False, "msg": f"No open position for {symbol}"}
+                elif not stop:
+                    result = {"ok": False, "msg": "No stop price provided"}
+                else:
+                    pos["stop"] = stop
+                    result = {"ok": True, "msg": f"Stop updated to ${stop:.4f}"}
+
+            import json
+            resp = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.end_headers()
+            self.wfile.write(resp)
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok":False,"msg":str(e)}).encode())
+
     def log_message(self,*a): pass
 
 # ══════════════════════════════════════════════════════════
