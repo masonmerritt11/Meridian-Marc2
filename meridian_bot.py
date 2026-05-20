@@ -68,7 +68,7 @@ SAFETY = {
     "paper_mode":           True,
     "max_trades_per_day":   6,
     "max_open_positions":   2,    # max 2 — margin limits at $500 account
-    "max_daily_loss_pct":   0.20,   # halt if down 20% on day
+    "max_daily_loss_pct":   0.15,   # halt if down 15% on day — the ONLY hard rule
     "max_drawdown_pct":     0.40,   # halt if down 40% from peak
     "min_rr_ratio":         1.3,    # minimum risk:reward — 1.3 for ranging, higher for trends
     "breakeven_at_r":       1.0,    # move stop to BE after 1R profit
@@ -136,13 +136,120 @@ UNITS_PER_CONTRACT = {
 }
 
 # Actual futures product IDs used for orders and candles
-# Crypto: perpetuals (no expiry, tracks spot with funding rate)
-# Commodities: monthly contracts (resolved dynamically)
 FUTURES_PRODUCT = {
-    "BTC-USD": "BIT-PERP",   # nano BTC perp, 0.01 BTC/contract
-    "ETH-USD": "ETH-PERP",   # nano ETH perp, 0.10 ETH/contract
-    "XRP-USD": None,          # no XRP perp — use monthly XRL
+    "BTC-USD": "BIT-PERP",
+    "ETH-USD": "ETH-PERP",
+    "XRP-USD": None,
 }
+
+def days_to_expiry(symbol: str) -> int:
+    """
+    Returns days until contract expiry.
+    Perps (BTC/ETH) never expire — return 999.
+    For commodities, parse expiry from active contract ID.
+    """
+    if symbol in {"BTC-USD", "ETH-USD"}:
+        return 999  # perpetuals never expire
+
+    # Get the active contract ID
+    base = FUTURES_BASE.get(symbol)
+    if not base:
+        return 999
+
+    try:
+        ids = get_futures_ids(base)
+        if not ids:
+            return 30  # default
+
+        # Parse date from format: GOL-27MAY26-CDE
+        pid     = ids[0]
+        parts   = pid.split("-")
+        if len(parts) < 2:
+            return 30
+        date_str = parts[1]  # e.g. "27MAY26"
+
+        mon_map = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                   "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+        day   = int(date_str[:2])
+        mon   = mon_map.get(date_str[2:5], 1)
+        year  = 2000 + int(date_str[5:7])
+        expiry = datetime.date(year, mon, day)
+        today  = datetime.date.today()
+        days   = (expiry - today).days
+        return max(0, days)
+    except Exception:
+        return 30  # default if parse fails
+
+def get_stop_multiplier(symbol: str) -> tuple[float, str]:
+    """
+    Stop philosophy:
+    - Unrealized loss is NOT a real loss until position is closed
+    - You can always roll to next contract before expiry
+    - Real risk = thesis breaks, not price temporarily moves against you
+
+    Stop tiers based on DTE:
+    - Days 15+  : Very wide (4.0x) — first 2-3 weeks, max breathing room
+    - Days 7-14 : Wide (2.5x)     — mid contract, still comfortable
+    - Days 3-6  : Normal (1.5x)   — approaching expiry, start tightening
+    - Days 0-2  : Tight (1.0x)    — must close or roll NOW
+
+    Daily account stop (separate from position stop):
+    - Never lose more than 15% of account in one day
+    - This is the ONLY hard rule — position stops are thesis-based
+    """
+    dte = days_to_expiry(symbol)
+
+    if dte >= 15:
+        return 4.0, f"very wide DTE={dte} — roll available"
+    elif dte >= 7:
+        return 2.5, f"wide DTE={dte}"
+    elif dte >= 3:
+        return 1.5, f"normal DTE={dte} — consider rolling"
+    else:
+        return 1.0, f"tight DTE={dte} — roll or close soon"
+
+
+def check_thesis_broken(symbol: str, pos: dict, price: float, macro: dict) -> tuple[bool, str]:
+    """
+    Check if the THESIS has broken — not just if price is down.
+    Returns (thesis_broken, reason)
+
+    Thesis breaks when the fundamental reason for the trade reverses:
+    - Gold long: DXY suddenly strengthens hard, Fed turns hawkish
+    - Oil short: supply disruption news, OPEC cut
+    - Crypto long: Fed hawkish surprise, risk-off event
+    A $100 dip on Gold while thesis is intact = hold
+    A $20 dip on Gold after hawkish Fed surprise = close
+    """
+    side = pos["side"]
+    fed  = macro.get("fed_stance","neutral")
+    dxy  = macro.get("dxy_trend","neutral")
+    inf  = macro.get("inflation_trend","stable")
+
+    if symbol == "XAU-USD":
+        if side == "long":
+            # Gold long thesis breaks if DXY strengthens AND Fed turns hawkish
+            if dxy == "rising" and fed == "hawkish":
+                return True, "Gold long thesis broken — DXY rising + Fed hawkish"
+        if side == "short":
+            if dxy == "falling" and inf == "rising":
+                return True, "Gold short thesis broken — DXY falling + inflation rising"
+
+    if symbol == "OIL-USD":
+        if side == "short":
+            # Oil short thesis breaks if supply shock or DXY falls hard
+            if dxy == "falling" and fed == "dovish":
+                return True, "Oil short thesis broken — DXY falling + Fed dovish"
+
+    if symbol in {"BTC-USD","ETH-USD","XRP-USD"}:
+        if side == "long":
+            if fed == "hawkish" and dxy == "rising":
+                return True, "Crypto long thesis broken — hawkish Fed + rising DXY"
+        if side == "short":
+            if fed == "dovish":
+                return True, "Crypto short thesis broken — Fed turned dovish"
+
+    return False, "thesis intact"
 
 # Real margin per contract confirmed from Coinbase account
 MARGIN_PER_CONTRACT = {
@@ -961,14 +1068,14 @@ def open_position(symbol: str, score_data: dict, price: float):
         "BTC-USD": 0.01, "ETH-USD": 0.10, "XRP-USD": 500,
         "XAU-USD": 1,    "XAG-USD": 50,   "OIL-USD": 10,
     }
-    units_per = UNITS_PER_CONTRACT.get(symbol, 1)
-    size      = units_per  # always exactly 1 contract
+    units_per   = UNITS_PER_CONTRACT.get(symbol, 1)
+    size        = units_per  # always exactly 1 contract
+    stop_mult, dte_note = get_stop_multiplier(symbol)
 
-    # Dollar risk on this trade = stop distance × contract size
+    # Dollar risk on this trade
     dollar_risk = abs(price - score_data["stop"]) * units_per
-    log.info(f"  {symbol}: 1 contract | "
-             f"stop distance ${abs(price-score_data['stop']):.4f} | "
-             f"dollar risk ~${dollar_risk:.2f}")
+    log.info(f"  {symbol}: 1 contract | stop distance ${abs(price-score_data['stop']):.4f} | "
+             f"dollar risk ~${dollar_risk:.2f} | {dte_note}")
 
     # Check drawdown limits
     daily_loss = state["daily_start_bal"] - state["account_balance"]
@@ -1009,6 +1116,7 @@ def open_position(symbol: str, score_data: dict, price: float):
         "atr":          score_data["atr"],
         "stop_moved_be":False,
         "partial_done": False,
+        "dte_at_entry": days_to_expiry(symbol),
         "reason":       score_data["reason"],
         "ny_hit":       score_data.get("ny_hit",False),
         "order_id":     oid,
@@ -1099,15 +1207,35 @@ def check_exits(prices: dict):
                      f"stop=${stop:.4f} target=${target:.4f} | "
                      f"R={r_moved:.2f} | P&L=${upnl:+.2f}")
 
-            # Stop hit
-            if (side=="long" and price<=stop) or (side=="short" and price>=stop):
-                close_position(symbol, pos, price, "Stop loss")
+            # ── Thesis check — close if fundamental reason breaks ──
+            macro = state.get("macro_context", {})
+            thesis_broken, thesis_reason = check_thesis_broken(symbol, pos, price, macro)
+            if thesis_broken:
+                close_position(symbol, pos, price, f"Thesis broken: {thesis_reason}")
                 continue
 
-            # Target hit
+            # ── Hard stop — only if price hits the wide DTE-based stop ──
+            # This is a last resort, not the primary exit
+            if (side=="long" and price<=stop) or (side=="short" and price>=stop):
+                close_position(symbol, pos, price, "Hard stop hit")
+                continue
+
+            # ── Daily account protection ──────────────────────────────
+            daily_loss_pct = (state["daily_start_bal"] - state["account_balance"]) / state["daily_start_bal"]
+            if daily_loss_pct >= SAFETY["max_daily_loss_pct"]:
+                close_position(symbol, pos, price, f"Daily stop — account down {daily_loss_pct:.1%}")
+                continue
+
+            # ── Target hit ────────────────────────────────────────────
             if (side=="long" and price>=target) or (side=="short" and price<=target):
                 close_position(symbol, pos, price, "Target hit")
                 continue
+
+            # ── Near expiry — alert to roll ───────────────────────────
+            dte = days_to_expiry(symbol)
+            if 0 < dte <= 3 and not pos.get("roll_alerted"):
+                log.warning(f"  ⚠️ {symbol}: {dte} days to expiry — consider rolling to next contract")
+                pos["roll_alerted"] = True
 
             # Move stop to break-even at 1R
             if not pos.get("stop_moved_be") and r_moved >= SAFETY["breakeven_at_r"]:
